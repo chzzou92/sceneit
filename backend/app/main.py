@@ -67,6 +67,10 @@ class PresignReq(BaseModel):
 class ProcessReq(BaseModel):
   video_path: str  # can be "s3://bucket/key" or local path
 
+class SearchTextReq(BaseModel):
+    filename: str
+    text_search: str 
+    top_k: int = 10
 @app.post("/process")
 def process(req: ProcessReq):
     path = req.video_path
@@ -275,12 +279,13 @@ def create_embeddings(source_list: List[str]) -> List[List[float]]:
     
     return emb_list
 
-def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: List[List[float]], source: str) -> None: 
+def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: List[List[float]], source: str, shots: List[ShotBoundary]) -> None: 
     vid = video_id_from_s3_uri(source)
     vectors = []
+    index = pc.Index(index_name)
     for scene_i, (scene_embeds, timepoints) in enumerate(zip(thumb_embeddings, thumb_timepoints)):  
         # thumb_embeddings: [scene][thumb_idx][768]
-        # thumb_timepoints: [scene][thumb_idx] (seconds you picked for each thumb)
+        # thumb_timepoints: [scene][thumb_idx] 
         start_s, end_s, start_f, end_f = shots[scene_i]
         for thumb_j, (vec, t_sec) in enumerate(zip(scene_embeds, timepoints)):
             vec_id = f"{vid}:s{scene_i:03d}:t{thumb_j:02d}"
@@ -300,7 +305,43 @@ def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: 
     # batch upsert
     for i in range(0, len(vectors), 100):
         index.upsert(vectors=vectors[i:i+100], namespace=vid)
-        
+
+@app.post("/search_embeddings_text")
+def search_embeddings_text(req: SearchTextReq) -> None: 
+    vid = video_id_from_s3_uri(req.filename)
+    with torch.no_grad():
+        inputs = processor(text=[req.text_search], return_tensors="pt",padding=True)
+        q = model.get_text_features(**inputs)
+    query_vec = q[0].cpu().numpy().tolist()
+    index = pc.Index("sceneit-thumbs")   
+    res = index.query(
+        vector=query_vec,
+        top_k=10,
+        namespace=vid,   
+        include_metadata=True,
+    )
+
+    # Convert to clean JSON
+    matches = [
+        {
+            "id": m.id,
+            "score": float(m.score),
+            "metadata": dict(m.metadata) if m.metadata is not None else {}
+        }
+        for m in res.matches
+    ]
+    #log a compact line per match
+    for m in matches:
+        logging.warning(
+            f"{m['id']} | score={m['score']:.3f} | scene={m['metadata'].get('scene_index')} | t={m['metadata'].get('t_sec')}"
+        )
+    
+    return {
+        "namespace": vid,
+        "query": req.text_search,
+        "top_k": req.top_k,
+        "matches": matches
+        }
 @app.post("/split_shots", response_model=SplitShotsResponse)
 def split_shots(req: SplitShotsRequest):
     tmp_dir = tempfile.mkdtemp(prefix="scenes_")
@@ -390,7 +431,12 @@ def split_shots(req: SplitShotsRequest):
         for c in counts:
             thumb_embeddings.append(flat_embeds[i:i+c])
             i += c
+        thumb_timepoints = []
+        for (start_s, end_s, start_f, end_f) in shots:
+            times = pick_timepoints(start_s, end_s, count=3)
+            thumb_timepoints.append(times)
 
+        put_embeddings(thumb_embeddings=thumb_embeddings, thumb_timepoints=thumb_timepoints, source=req.source_s3_uri, shots=shots)
         return SplitShotsResponse(
             shots=[ShotBoundary(
                 start_time=s[0], end_time=s[1],
