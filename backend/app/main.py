@@ -1,15 +1,25 @@
 from fastapi import FastAPI, UploadFile, File, Form,HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pathlib import Path
 from uuid import uuid4
-import os, boto3, json, subprocess, logging
+import os, boto3, subprocess, logging
 from urllib.parse import urlparse
 from dotenv import load_dotenv, dotenv_values
 from pathlib import Path
 import cv2, numpy as np, tempfile, shutil, os
 from skimage.metrics import structural_similarity as ssim
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+from pinecone import Pinecone
+from pinecone import ServerlessSpec
+from PIL import Image
+from transformers import CLIPProcessor, CLIPModel 
+import torch
+import hashlib
+
+from scenedetect import open_video, SceneManager
+from scenedetect.detectors import ContentDetector  # or AdaptiveDetector
+from scenedetect.video_splitter import split_video_ffmpeg
 
 
 DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"  # backend/.env
@@ -42,9 +52,11 @@ def healthz():
 AWS_REGION = os.getenv("AWS_REGION")
 S3_BUCKET  = os.getenv("S3_BUCKET")
 S3_PREFIX  = os.getenv("S3_PREFIX")
+PC_KEY = os.getenv("PINECONE_ACCESS_KEY")
 logging.warning(f"S3_BUCKET: {S3_BUCKET}")
 logging.warning(f"S3_PREFIX: {S3_PREFIX}")
 logging.warning(f"REGION: {AWS_REGION}")
+logging.warning(f"PC: {PC_KEY}")
 
 s3 = boto3.client("s3", region_name=AWS_REGION)
 
@@ -54,30 +66,6 @@ class PresignReq(BaseModel):
 
 class ProcessReq(BaseModel):
   video_path: str  # can be "s3://bucket/key" or local path
-
-def ffprobe_json(path: str) -> dict:
-    out = subprocess.check_output([
-        "ffprobe", "-v", "error", 
-        "-print_format", "json",
-        "-show_format", "-show_streams",
-        path
-    ], text=True)
-    logging.warning(json.loads(out))
-    return json.loads(out)
-
-def presign_get(bucket: str, key:str, expires=3600) -> str:
-    return s3.generate_presigned_url(
-        ClientMethod="get_object", 
-        Params={"Bucket": bucket, "Key": key}, 
-        ExpiresIn=expires
-    )
-
-def run_ffmpeg(cmd: list[str]) -> None: 
-    subprocess.check_call(cmd)
-
-def upload_file_to_s3(local_path: str, bucket: str, key: str, content_type: str | None = None):
-    extra = {"ContentType": content_type} if content_type else {}
-    s3.upload_file(local_path, bucket, key, ExtraArgs=extra)
 
 @app.post("/process")
 def process(req: ProcessReq):
@@ -126,183 +114,292 @@ def presign(req: PresignReq):
     }
 
 
-# --- OpenCV helpers ---
-def frame_time(frame_idx: int, fps: float) -> float:
-    return frame_idx / max(fps, 1e-6)
+# ---------- Config / Helpers ----------
 
-def hsv_hist(frame_bgr: np.ndarray) -> np.ndarray:
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([hsv], [0,1,2], None, [16,8,8], [0,180, 0,256, 0,256])
-    cv2.normalize(hist, hist)
-    return hist.reshape(-1)
+def parse_s3_uri(s3_uri: str):
+    # s3://bucket/key...
+    if not s3_uri.startswith("s3://"):
+        raise ValueError("S3 URI must start with s3://")
+    no_scheme = s3_uri[len("s3://"):]
+    bucket, _, key = no_scheme.partition("/")
+    if not bucket or not key:
+        raise ValueError("Invalid S3 URI; expected s3://bucket/key")
+    return bucket, key
 
-def bhatta(a: np.ndarray, b: np.ndarray) -> float:
-    return float(cv2.compareHist(a.astype(np.float32), b.astype(np.float32), cv2.HISTCMP_BHATTACHARYYA))
+def s3_download(s3_uri: str, local_path: str):
+    bucket, key = parse_s3_uri(s3_uri)
+    s3 = boto3.client("s3")
+    s3.download_file(bucket, key, local_path)
 
-def pick_keyframe_ssim(frames: List[np.ndarray]) -> int:
-    """Return index of the most 'representative' frame via SSIM-to-mean heuristic."""
-    if not frames: return 0
-    gray_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
-    mean_img = np.mean(np.stack(gray_frames, axis=0), axis=0).astype(np.uint8)
-    scores = [ssim(g, mean_img, data_range=255) for g in gray_frames]
-    return int(np.argmax(scores))
+def s3_upload(local_path: str, dest_s3_uri: str):
+    bucket, key = parse_s3_uri(dest_s3_uri)
+    s3 = boto3.client("s3")
+    s3.upload_file(local_path, bucket, key)
 
-def smooth_signal(x: np.ndarray, k: int = 3) -> np.ndarray:
-    if len(x) < k: return x
-    kernel = np.ones(k) / k
-    return np.convolve(x, kernel, mode="same")
-
-
-# --- S3 upload util ---
-def s3_put_bytes(img_bgr: np.ndarray, bucket: str, key: str, quality: int = 90):
-    ok, buf = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    if not ok:
-        raise RuntimeError("cv2.imencode failed for keyframe upload")
-    s3.put_object(Bucket=bucket, Key=key, Body=buf.tobytes(), ContentType="image/jpeg")
-
-# --- API model ---
-class ShotReq(BaseModel):
-    video_path: str             # s3://... or local path
-    save_frames: bool = True    # upload keyframes to S3
-    threshold: float = 0.25     # Bhattacharyya distance threshold
-    min_shot_len_sec: float = 0.7
-    smooth_k: int = 5           # moving average window over distances
-    max_frames: int | None = None  # for debugging; limit frames scanned
-
-@app.post("/shots")
-def shots(req: ShotReq):
-    local_path, src_bucket, src_key = resolve_local_video(req.video_path)
-    tmp_dir = os.path.dirname(local_path) if src_bucket else tempfile.mkdtemp(prefix="sceneit_shots_")
+def ensure_ffmpeg():
     try:
-        cap = cv2.VideoCapture(local_path)
-        if not cap.isOpened():
-            raise HTTPException(400, "OpenCV failed to open the video (unsupported codec/container or missing ffmpeg build).")
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    except Exception:
+        raise RuntimeError("ffmpeg not found on PATH; required for splitting clips.")
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        max_i = min(total, req.max_frames) if req.max_frames else total
+def video_id_from_s3_uri(s3_uri: str) -> str:
+    # s3://bucket/key
+    key = s3_uri.split("/", 3)[-1]
+    return hashlib.sha1(key.encode()).hexdigest()[:16]
 
-        # 1) Pass 1: compute per-frame histograms & distances
-        hists = []
-        distances = [0.0]  # distance[0] = 0
-        frames_meta = []   # store (frame_idx, time_sec) for shot delineation
+# ---------- Request/Response Models ----------
 
+class SplitShotsRequest(BaseModel):
+    # Input video
+    source_s3_uri: str = Field(..., description="e.g., s3://my-bucket/path/to/video.mp4")
+    # Shot detection params
+    threshold: float = Field(27.0, description="PySceneDetect ContentDetector threshold (higher = fewer cuts)")
+    min_scene_len: int = Field(4, description="Minimum scene length in frames (e.g., at 24fps)")
+    # Whether to actually cut clips (requires ffmpeg)
+    split_clips: bool = Field(True, description="If true, export per-shot clips via ffmpeg.")
+    # Where to upload results if split_clips is True
+    output_prefix_s3: Optional[str] = Field(None, description="e.g., s3://my-bucket/outputs/my-video/")
+
+class ShotBoundary(BaseModel):
+    start_time: float  # seconds
+    end_time: float    # seconds
+    start_frame: int
+    end_frame: int
+
+class SplitShotsResponse(BaseModel):
+    shots: List[ShotBoundary]
+    thumbnail_s3_uris_by_scene: Optional[List[List[str]]] = None
+    thumb_embeddings: Optional[List[List[List[float]]]] = None
+
+# ---------- Core Shot Detection ----------
+
+def detect_scenes(video_path: str, threshold: float, min_scene_len: int):
+    video = open_video(video_path)
+    scene_manager = SceneManager()
+    scene_manager.add_detector(ContentDetector(threshold=threshold, min_scene_len=min_scene_len))
+    scene_manager.detect_scenes(video)
+
+    scene_list = scene_manager.get_scene_list()  
+
+    shots = []
+    for start_tc, end_tc in scene_list:
+        shots.append((
+            start_tc.get_seconds(),
+            end_tc.get_seconds(),
+            start_tc.get_frames(),
+            end_tc.get_frames()
+        ))
+    return scene_list, shots
+
+
+def pick_timepoints(start_s: float, end_s: float, count: int = 3) -> List[float]:
+    """Pick `count` times inside [start_s, end_s] (biased away from hard cuts)."""
+    dur = max(0.0, end_s - start_s)
+    if dur <= 0.0:
+        return [start_s]
+
+    # If the scene is very short, just return the midpoint (or up to count=2)
+    if dur < 0.6:  
+        mids = [start_s + dur * 0.5]
+        if dur > 0.25 and count >= 2:
+            mids = [start_s + dur * 0.33, start_s + dur * 0.66]
+        return mids[:count]
+
+    # For longer scenes, spread across interior (20%, 50%, 80%)
+    anchors = [0.2, 0.5, 0.8]
+    # Respect requested count
+    anchors = anchors[:count] if count <= 3 else [(i+1)/(count+1) for i in range(count)]
+
+    # Avoid landing exactly on cuts: pull slightly inward by epsilon on each side.
+    eps = min(0.1, dur * 0.02)  # 100ms or 2% of scene, whichever smaller
+    return [max(start_s + eps, min(end_s - eps, start_s + a*dur)) for a in anchors]
+
+def extract_frame_ffmpeg(video_path: str, t_sec: float, out_path: str):
+    """Extract a single frame as JPEG at time t_sec using accurate seeking."""
+    # Accurate seek: place -ss AFTER -i; a bit slower but reliable for MOV/VFR.
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", video_path,
+        "-ss", f"{t_sec:.3f}",
+        "-frames:v", "1",
+        "-q:v", "2",           # 2 = high quality JPEG
+        "-y", out_path
+    ]
+    subprocess.run(cmd, check=True)
+
+def make_scene_thumbnails(
+    video_path: str,
+    shots: List[Tuple[float, float, int, int]],  # (start_s, end_s, start_f, end_f)
+    out_dir: str,
+    per_scene: int = 3,
+    basename: str = "shot"
+) -> List[List[str]]:
+    """
+    For each scene, produce up to `per_scene` JPEGs.
+    Returns a parallel list: [[paths for scene 0], [paths for scene 1], ...]
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    all_paths: List[List[str]] = []
+    for idx, (s_start, s_end, _, _) in enumerate(shots):
+        times = pick_timepoints(s_start, s_end, per_scene)
+        scene_paths = []
+        for j, t in enumerate(times, start=1):
+            out_name = f"{basename}-{idx:03d}_{j:02d}.jpg"
+            out_path = os.path.join(out_dir, out_name)
+            extract_frame_ffmpeg(video_path, t, out_path)
+            scene_paths.append(out_path)
+        all_paths.append(scene_paths)
+    return all_paths
+
+model_name = "openai/clip-vit-large-patch14"  
+processor = CLIPProcessor.from_pretrained(model_name)
+model = CLIPModel.from_pretrained(model_name)
+pc = Pinecone(api_key=PC_KEY)
+index_name = "sceneit-thumbs"
+# create once; if it already exists, skip
+if index_name not in [i.name for i in pc.list_indexes()]:
+    pc.create_index(
+        name=index_name,
+        dimension=768,                 # CLIP L/14
+        metric="cosine",               # use cosine similarity
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
+def create_embeddings(source_list: List[str]) -> List[List[float]]:
+    image_objects = []
+    for source in source_list: 
+        image_objects.append(Image.open(source))
+    inputs = processor(images=image_objects, return_tensors="pt" )
+    with torch.no_grad():
+        image_embeddings = model.get_image_features(**inputs)
+    emb_list = image_embeddings.detach().cpu().numpy().tolist()
+    
+    return emb_list
+
+def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: List[List[float]], source: str) -> None: 
+    vid = video_id_from_s3_uri(source)
+    vectors = []
+    for scene_i, (scene_embeds, timepoints) in enumerate(zip(thumb_embeddings, thumb_timepoints)):  
+        # thumb_embeddings: [scene][thumb_idx][768]
+        # thumb_timepoints: [scene][thumb_idx] (seconds you picked for each thumb)
+        start_s, end_s, start_f, end_f = shots[scene_i]
+        for thumb_j, (vec, t_sec) in enumerate(zip(scene_embeds, timepoints)):
+            vec_id = f"{vid}:s{scene_i:03d}:t{thumb_j:02d}"
+            meta = {
+                "video_id": vid,
+                "source_s3_uri": source,  # or bucket/key separately
+                "scene_index": scene_i,
+                "thumb_index": thumb_j,
+                "t_sec": float(t_sec),
+                "start_s": float(start_s),
+                "end_s": float(end_s),
+                "start_f": int(start_f),
+                "end_f": int(end_f),
+            }
+            vectors.append((vec_id, vec, meta))
+
+    # batch upsert
+    for i in range(0, len(vectors), 100):
+        index.upsert(vectors=vectors[i:i+100], namespace=vid)
+        
+@app.post("/split_shots", response_model=SplitShotsResponse)
+def split_shots(req: SplitShotsRequest):
+    tmp_dir = tempfile.mkdtemp(prefix="scenes_")
+    try:
+        # --- decide a local filename with the same extension as S3 key ---
+        _, key = parse_s3_uri(req.source_s3_uri)
+        ext = os.path.splitext(key)[1] or ".mp4"
+        local_video = os.path.join(tmp_dir, f"input-{uuid4().hex}{ext}")
+
+        # --- download the video from S3 BEFORE detection ---
+        s3_download(req.source_s3_uri, local_video)
+
+        # --- detect scenes once; reuse scene_list for splitting ---
+        scene_list, shots = detect_scenes(
+            video_path=local_video,
+            threshold=req.threshold,
+            min_scene_len=req.min_scene_len
+        )
+
+        # timestamps-only path
+        if not req.split_clips:
+            return SplitShotsResponse(
+                shots=[ShotBoundary(
+                    start_time=s[0], end_time=s[1],
+                    start_frame=s[2], end_frame=s[3]
+                ) for s in shots]
+            )
+
+        # --- split clips ---
+        ensure_ffmpeg()
+        out_dir = os.path.join(tmp_dir, "out")
+        os.makedirs(out_dir, exist_ok=True)
+        output_template = os.path.join(out_dir, "shot-$SCENE_NUMBER.mp4")
+
+        split_video_ffmpeg(
+            input_video_path=local_video,
+            scene_list=scene_list,
+            output_file_template=output_template
+        )
+        # make thumbs 
+        thumb_out_dir = os.path.join(tmp_dir, "thumbs")
+        thumb_paths_by_scene = make_scene_thumbnails(
+            video_path=local_video,
+            shots=shots,          # your (start_s, end_s, start_f, end_f) tuples
+            out_dir=thumb_out_dir,
+            per_scene=3,          # 2 or 3, your call
+            basename="shot"
+        )
+        logging.info(f"Made {sum(len(x) for x in thumb_paths_by_scene)} thumbnails "
+                    f"across {len(thumb_paths_by_scene)} scenes at {thumb_out_dir}")
+
+        # # --- optionally upload to S3 ---
+        # clip_s3_uris = None
+        if req.output_prefix_s3:
+            prefix = req.output_prefix_s3 if req.output_prefix_s3.endswith("/") else req.output_prefix_s3 + "/"
+        #     created = sorted(
+        #         f for f in os.listdir(out_dir)
+        #         if f.startswith("shot-") and f.endswith(".mp4")
+        #     )
+        #     clip_s3_uris = []
+        #     for filename in created:
+        #         local_path = os.path.join(out_dir, filename)
+        #         dest_uri = prefix + filename
+        #         s3_upload(local_path, dest_uri)
+        #         clip_s3_uris.append(dest_uri)
+            
+            # thumbs_prefix = prefix + "thumbnails/"
+            # logging.info(f"Uploading thumbnails to {thumbs_prefix}")
+            # thumbnail_s3_uris_by_scene = []
+            # for scene_paths in thumb_paths_by_scene:
+            #     uris = []
+            #     for p in scene_paths:
+            #         dest_uri = thumbs_prefix + os.path.basename(p)
+            #         bucket, k = parse_s3_uri(dest_uri)
+            #         boto3.client("s3").upload_file(
+            #             p, bucket, k, ExtraArgs={"ContentType": "image/jpeg"}
+            #         )
+            #         uris.append(dest_uri)
+            #     thumbnail_s3_uris_by_scene.append(uris)
+        
+        if thumb_paths_by_scene: 
+            flat_thumb_paths = [p for scene in thumb_paths_by_scene for p in scene]
+            flat_embeds = create_embeddings(flat_thumb_paths)
+        counts = [len(scene) for scene in thumb_paths_by_scene]
+        thumb_embeddings = []
         i = 0
-        while i < max_i:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            hist = hsv_hist(frame)
-            hists.append(hist)
-            if i > 0:
-                distances.append(bhatta(hist, hists[i-1]))
-            frames_meta.append((i, frame_time(i, fps)))
-            i += 1
+        for c in counts:
+            thumb_embeddings.append(flat_embeds[i:i+c])
+            i += c
 
-        cap.release()
-        distances = np.array(distances, dtype=np.float32)
-        distances_s = smooth_signal(distances, k=req.smooth_k)
+        return SplitShotsResponse(
+            shots=[ShotBoundary(
+                start_time=s[0], end_time=s[1],
+                start_frame=s[2], end_frame=s[3]
+            ) for s in shots], thumbnail_s3_uris_by_scene=None,
+            thumb_embeddings=thumb_embeddings
+        )
 
-        # 2) Find boundaries by threshold with a minimum shot length
-        shots_idx = [0]  # start index of each shot (frame idx)
-        last_cut_time = 0.0
-        for idx, d in enumerate(distances_s):
-            t = frame_time(idx, fps)
-            if d >= req.threshold and (t - last_cut_time) >= req.min_shot_len_sec:
-                shots_idx.append(idx)
-                last_cut_time = t
-        if shots_idx[-1] != (i-1):
-            shots_idx.append(i-1)  # ensure closing boundary
-
-        # 3) For each shot, select a keyframe (SSIM-to-mean heuristic)
-        results = []
-        cap = cv2.VideoCapture(local_path)  # reopen for frame access
-        # quick random access helper
-        def read_frame(idx: int) -> np.ndarray | None:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ok, f = cap.read()
-            return f if ok else None
-
-        for s in range(len(shots_idx)-1):
-            s_start_idx = shots_idx[s]
-            s_end_idx   = shots_idx[s+1]
-            # Guard against empty shots
-            if s_end_idx <= s_start_idx:
-                continue
-
-            # Sample frames in the shot (stride to save CPU on long shots)
-            stride = max(int(fps // 4), 1)  # ~4 samples per second; tune as needed
-            sample_indices = list(range(s_start_idx, s_end_idx, stride))
-            sample_frames = []
-            for idx in sample_indices:
-                f = read_frame(idx)
-                if f is not None:
-                    sample_frames.append(f)
-            if not sample_frames:
-                continue
-
-            best_local = pick_keyframe_ssim(sample_frames)
-            best_idx   = sample_indices[best_local]
-            best_time  = frame_time(best_idx, fps)
-            start_t    = frame_time(s_start_idx, fps)
-            end_t      = frame_time(s_end_idx, fps)
-
-            keyframe_s3 = None
-            if req.save_frames and S3_BUCKET:
-                # choose a video id-ish base from source key/path
-                base = (src_key or os.path.basename(local_path)).rsplit(".", 1)[0].replace("/", "_")
-                key = f"{S3_PREFIX}frames/{base}/shot_{s:04d}_t{int(round(best_time*1000)):06d}.jpg"
-                kf = read_frame(best_idx)  # read exactly the chosen frame
-                if kf is not None:
-                    s3_put_bytes(kf, S3_BUCKET, key)
-                    keyframe_s3 = key
-
-            results.append({
-                "shot_index": s,
-                "start_time": round(start_t, 3),
-                "end_time": round(end_t, 3),
-                "keyframe_time": round(best_time, 3),
-                "keyframe_s3_key": keyframe_s3
-            })
-
-        cap.release()
-        return {
-            "ok": True,
-            "video_path": req.video_path,
-            "fps": fps,
-            "frame_count": i,
-            "threshold_used": req.threshold,
-            "min_shot_len_sec": req.min_shot_len_sec,
-            "shots": results
-        }
-        # distances = np.array(distances, dtype=np.float32)
-        # dist_s = smooth_signal(distances, k=req.smooth_k)
-
-        # def q(x, p):  # percentile helper
-        #     return float(np.percentile(x, p)) if len(x) else 0.0
-
-        # dbg = {
-        #     "fps": fps,
-        #     "frame_count": int(i),
-        #     "duration_sec": float(i / max(fps,1e-6)),
-        #     "threshold": req.threshold,
-        #     "smooth_k": req.smooth_k,
-        #     "min_shot_len_sec": req.min_shot_len_sec,
-        #     "dist_mean": float(distances.mean()) if len(distances) else 0.0,
-        #     "dist_std": float(distances.std()) if len(distances) else 0.0,
-        #     "dist_min": float(distances.min()) if len(distances) else 0.0,
-        #     "dist_max": float(distances.max()) if len(distances) else 0.0,
-        #     "dist_p90": q(distances, 90),
-        #     "dist_p95": q(distances, 95),
-        #     "dist_p99": q(distances, 99),
-        #     "sm_mean": float(dist_s.mean()) if len(dist_s) else 0.0,
-        #     "sm_p95": q(dist_s, 95),
-        #     "sm_p99": q(dist_s, 99),
-        # }
-
-        # return {
-        #     "yeah" : dbg
-        # }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if not src_bucket:  # if the source was local, we created our own tmp dir
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)

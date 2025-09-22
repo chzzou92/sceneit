@@ -4,17 +4,15 @@ import Uploader from "./Uploader";
 
 export default function Home() {
   const testShots = async () => {
-    const uri =
-      "s3://sceneit-chriszou-001/uploads918c75ff-d0c2-4401-abd5-4e0fc586e357.mov";
-
-    const resp = await fetch(process.env.NEXT_PUBLIC_API + "/shots", {
+    const resp = await fetch(process.env.NEXT_PUBLIC_API + "/split_shots", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        video_path: uri,
-        save_frames: true, // uploads chosen keyframes to S3
-        threshold: 0.15, // optional tuning
-        min_shot_len_sec: 0.2, // optional tuning
+         source_s3_uri: "s3://sceneit-chriszou-001/uploads918c75ff-d0c2-4401-abd5-4e0fc586e357.mov",
+        threshold: 22.0,
+        min_scene_len: 12,
+        split_clips: true,
+        output_prefix_s3: "s3://sceneit-chriszou-001/outputs/video1/",
       }),
     });
     const data = await resp.json();
