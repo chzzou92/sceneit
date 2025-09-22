@@ -2,20 +2,23 @@
 import React, { useId } from "react";
 import styled from "styled-components";
 
+
 type UploadButtonProps = {
   onFileSelect: (file: File) => void;
-  accept?: string;
+  accept: string;
   multiple?: boolean;
   disabled?: boolean;
   label?: string;
+  uploadType: "video" | "photo";
 };
 
 const UploadButton = ({
   onFileSelect,
-  accept = "video/*",
+  accept,
   multiple = false,
   disabled = false,
-  label = "Choose a video",
+  label,
+  uploadType,
 }: UploadButtonProps) => {
   const inputId = useId();
 
@@ -24,7 +27,7 @@ const UploadButton = ({
     if (file) onFileSelect(file);
   };
   return (
-    <StyledWrapper>
+    <StyledWrapper $uploadType={uploadType}>
       <div className="container">
         <div className="folder">
           <div className="front-side">
@@ -50,7 +53,7 @@ const UploadButton = ({
   );
 };
 
-const StyledWrapper = styled.div`
+const StyledWrapper = styled.div<{ $uploadType: "video" | "photo" }>`
   .container {
     --transition: 350ms;
     --folder-W: 120px;
@@ -60,7 +63,10 @@ const StyledWrapper = styled.div`
     align-items: center;
     justify-content: flex-end;
     padding: 10px;
-    background: linear-gradient(135deg, #6dd5ed, #2193b0);
+    background: ${({ $uploadType }) =>
+      $uploadType === "video"
+        ? "linear-gradient(135deg, #6dd5ed, #2193b0)"
+        : "linear-gradient(135deg, #ff9a9e, #fad0c4)"};
     border-radius: 15px;
     box-shadow: 0 15px 30px rgba(0, 0, 0, 0.2);
     height: calc(var(--folder-H) * 1.7);

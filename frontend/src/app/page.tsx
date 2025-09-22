@@ -24,20 +24,22 @@ export default function Home() {
   };
 
   const getSearchText = async () => {
-    console.log(searchText)
+    const form = new FormData();
+    form.append(
+      "filename",
+      "s3://sceneit-chriszou-001/uploads918c75ff-d0c2-4401-abd5-4e0fc586e357.mov"
+    );
+    form.append("text_search", searchText);
+    form.append("top_k", String(10));
+
     const resp = await fetch(
-      process.env.NEXT_PUBLIC_API + "/search_embeddings_text",
+      `${process.env.NEXT_PUBLIC_API}/search_embeddings`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          filename:
-            "s3://sceneit-chriszou-001/uploads918c75ff-d0c2-4401-abd5-4e0fc586e357.mov",
-          text_search: searchText,
-          top_k: 10,
-        }),
+        body: form, 
       }
     );
+
     if (!resp.ok) {
       console.error("Search failed:", await resp.text());
       return;
@@ -51,7 +53,7 @@ export default function Home() {
       <main className="flex flex-col gap-20 row-start-2 items-center sm:items-start ">
         <h1 className="text-2xl font-bold">SceneIt</h1>
         <div className="flex flex-col gap-4 items-centersm:flex-row">
-          <Uploader />
+          <Uploader type="video" />
           <button
             className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full"
             onClick={testShots}
@@ -66,6 +68,9 @@ export default function Home() {
             >
               Search
             </button>
+          </div>
+          <div className="py-12">
+            <Uploader type="photo" />
           </div>
         </div>
       </main>

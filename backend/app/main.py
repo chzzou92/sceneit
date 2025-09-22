@@ -16,6 +16,7 @@ from PIL import Image
 from transformers import CLIPProcessor, CLIPModel 
 import torch
 import hashlib
+from io import BytesIO
 
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector  # or AdaptiveDetector
@@ -67,10 +68,6 @@ class PresignReq(BaseModel):
 class ProcessReq(BaseModel):
   video_path: str  # can be "s3://bucket/key" or local path
 
-class SearchTextReq(BaseModel):
-    filename: str
-    text_search: str 
-    top_k: int = 10
 @app.post("/process")
 def process(req: ProcessReq):
     path = req.video_path
@@ -306,42 +303,64 @@ def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: 
     for i in range(0, len(vectors), 100):
         index.upsert(vectors=vectors[i:i+100], namespace=vid)
 
-@app.post("/search_embeddings_text")
-def search_embeddings_text(req: SearchTextReq) -> None: 
-    vid = video_id_from_s3_uri(req.filename)
-    with torch.no_grad():
-        inputs = processor(text=[req.text_search], return_tensors="pt",padding=True)
-        q = model.get_text_features(**inputs)
-    query_vec = q[0].cpu().numpy().tolist()
-    index = pc.Index("sceneit-thumbs")   
-    res = index.query(
-        vector=query_vec,
-        top_k=10,
-        namespace=vid,   
-        include_metadata=True,
-    )
+@app.post("/search_embeddings")
+async def search_embeddings(
+    filename: str = Form(...),
+    text_search: str | None = Form(None),
+    image_search: UploadFile | None = File(None),
+    top_k: int = Form(10)
+):
 
-    # Convert to clean JSON
-    matches = [
-        {
-            "id": m.id,
-            "score": float(m.score),
-            "metadata": dict(m.metadata) if m.metadata is not None else {}
-        }
-        for m in res.matches
-    ]
-    #log a compact line per match
-    for m in matches:
-        logging.warning(
-            f"{m['id']} | score={m['score']:.3f} | scene={m['metadata'].get('scene_index')} | t={m['metadata'].get('t_sec')}"
+    try: 
+        vid = video_id_from_s3_uri(filename)
+        if text_search:
+            with torch.no_grad():
+                inputs = processor(text=[text_search], return_tensors="pt",padding=True)
+                q = model.get_text_features(**inputs)
+            query_vec = q[0].cpu().numpy().tolist()
+        elif image_search is not None: 
+            content = await image_search.read()
+            image = Image.open(BytesIO(content))
+            with torch.no_grad():
+                inputs = processor(images=[image], return_tensors="pt")
+                q = model.get_image_features(**inputs)
+            query_vec = q[0].cpu().numpy().tolist()
+        else: 
+            raise HTTPException(status_code=400, detail="Provide either text_search or image_search")
+        
+        index = pc.Index("sceneit-thumbs")   
+        res = index.query(
+            vector=query_vec,
+            top_k=top_k,
+            namespace=vid,   
+            include_metadata=True,
         )
-    
-    return {
-        "namespace": vid,
-        "query": req.text_search,
-        "top_k": req.top_k,
-        "matches": matches
-        }
+
+        # Convert to clean JSON
+        matches = [
+            {
+                "id": m.id,
+                "score": float(m.score),
+                "metadata": dict(m.metadata) if m.metadata is not None else {}
+            }
+            for m in res.matches
+        ]
+        #log a compact line per match
+        for m in matches:
+            logging.warning(
+                f"{m['id']} | score={m['score']:.3f} | scene={m['metadata'].get('scene_index')} | t={m['metadata'].get('t_sec')}"
+            )
+        
+        return {
+            "namespace": vid,
+            "query": text_search if text_search else image_search,
+            "top_k": top_k,
+            "matches": matches
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 @app.post("/split_shots", response_model=SplitShotsResponse)
 def split_shots(req: SplitShotsRequest):
     tmp_dir = tempfile.mkdtemp(prefix="scenes_")

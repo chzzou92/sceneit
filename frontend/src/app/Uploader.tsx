@@ -1,9 +1,12 @@
-// Uploader.tsx
 "use client";
 import React, { useState } from "react";
 import UploadButton from "@/components/uploadButton";
 
-export default function Uploader() {
+type UploaderProps = {
+  type: "video" | "photo";
+};
+
+export default function Uploader({ type }: UploaderProps) {
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<"idle" | "uploading" | "done" | "error">(
     "idle"
@@ -15,41 +18,86 @@ export default function Uploader() {
   };
 
   const uploadFile = async (f: File) => {
-    const presign = await fetch(process.env.NEXT_PUBLIC_API + "/presign", {
-      method: "POST",
-      headers: { "Content-type": "Application/json" },
-      body: JSON.stringify({
-        filename: f.name,
-        content_type: f.type || "video/mp4",
-      }),
-    }).then((r) => r.json()).then((data) =>{
-        console.log(data);
-        return data;
-    }).catch((e) =>{
-        console.error("Upload error:", e);
-    });
+    setStatus("uploading");
+    try {
+      if (type === "video") {
+        const presign = await fetch(process.env.NEXT_PUBLIC_API + "/presign", {
+          method: "POST",
+          headers: { "Content-type": "Application/json" },
+          body: JSON.stringify({
+            filename: f.name,
+            content_type: f.type || "video/mp4",
+          }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            console.log(data);
+            return data;
+          })
+          .catch((e) => {
+            console.error("Upload error:", e);
+          });
 
-    // upload directly to S3
-    await fetch(presign.upload_url, {
-      method: "PUT",
-      headers: { "Content-Type": f.type || "application/octet-stream" },
-      body: f,
-    });
+        // upload directly to S3
+        await fetch(presign.upload_url, {
+          method: "PUT",
+          headers: { "Content-Type": f.type || "application/octet-stream" },
+          body: f,
+        });
 
-    // now get the s3_uri path
-    await fetch(process.env.NEXT_PUBLIC_API + "/process", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ video_path: presign.s3_uri }),
-    });
+        // now get the s3_uri path
+        await fetch(process.env.NEXT_PUBLIC_API + "/process", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ video_path: presign.s3_uri }),
+        });
+        setStatus("done");
+      } else if (type === "photo") {
+        const form = new FormData();
+        form.append(
+          "filename",
+          "s3://sceneit-chriszou-001/uploads918c75ff-d0c2-4401-abd5-4e0fc586e357.mov"
+        );
+        form.append("top_k", String(12));
+        form.append("image_search", f); // field name must match FastAPI param
+
+        const resp = await fetch(
+          `${process.env.NEXT_PUBLIC_API}/search_embeddings`,
+          {
+            method: "POST",
+            body: form, // DO NOT set Content-Type
+          }
+        );
+
+        if (!resp.ok) {
+          console.error("Image search failed:", await resp.text());
+          return;
+        }
+        const data = await resp.json();
+        console.log("Search results:", data);
+
+        setStatus("done");
+      }
+    } catch (e) {
+      console.error("Upload error:", e);
+      setStatus("error");
+    }
   };
 
   return (
     <div style={{ maxWidth: 360 }}>
       <UploadButton
         onFileSelect={onFileSelect}
-        label={status === "uploading" ? "Uploading…" : "Choose a video"}
+        accept={type === "video" ? "video/*" : "image/*"}
+        label={
+          status === "uploading"
+            ? "Uploading…"
+            : type === "video"
+            ? "Choose a video"
+            : "Choose a photo"
+        }
         disabled={status === "uploading"}
+        uploadType={type}
       />
       {file && (
         <p style={{ marginTop: 8 }}>
