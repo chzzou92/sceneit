@@ -1,0 +1,4 @@
+node_modules/* linguist-vendored
+frontend/node_modules/* linguist-vendored
+frontend/.next/* linguist-generated
+frontend/dist/* linguist-generated

@@ -1,0 +1,22 @@
+# Node.js / frontend
+node_modules/
+.next/
+dist/
+build/
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+
+# Python / backend
+.venv/
+__pycache__/
+*.pyc
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Env files
+.env
+.env.*

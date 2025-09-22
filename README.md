@@ -2,7 +2,7 @@
 
 SceneIt is a system for semantic video search. Instead of scrubbing through footage manually, you can query your films with natural language (e.g., *"when does a dog appear on the couch?"*) or with an image example (e.g., upload a still frame from another film to find visually similar scenes).
 
-At its core, SceneIt extracts representative frames from videos, embeds them using CLIP, and indexes the embeddings in Pinecone for efficient semantic search.
+At its core, SceneIt extracts representative frames from videos, embeds them using OpenAI CLIP, and indexes the embeddings in Pinecone for efficient semantic search.
 
 ---
 
