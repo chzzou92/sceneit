@@ -1,6 +1,8 @@
 "use client";
 import React, { useState } from "react";
 import UploadButton from "@/components/uploadButton";
+import { createSHA256 } from "hash-wasm";
+import { create } from "domain";
 
 type UploaderProps = {
   type: "video" | "photo";
@@ -12,6 +14,20 @@ export default function Uploader({ type }: UploaderProps) {
     "idle"
   );
 
+  async function sha256VideoFile(file: File): Promise<string> {
+    const hasher = await createSHA256();
+    const chunkSize = 4 * 1024 * 1024;
+    let offset = 0;
+
+    while (offset < file.size) {
+      const slice = file.slice(offset, offset + chunkSize);
+      const buffer = await slice.arrayBuffer();
+      hasher.update(new Uint8Array(buffer));
+      offset += chunkSize;
+    }
+    return hasher.digest("hex");
+  }
+
   const onFileSelect = (f: File) => {
     setFile(f);
     void uploadFile(f);
@@ -21,37 +37,37 @@ export default function Uploader({ type }: UploaderProps) {
     setStatus("uploading");
     try {
       if (type === "video") {
-        const presign = await fetch(process.env.NEXT_PUBLIC_API + "/presign", {
-          method: "POST",
-          headers: { "Content-type": "Application/json" },
-          body: JSON.stringify({
-            filename: f.name,
-            content_type: f.type || "video/mp4",
-          }),
-        })
-          .then((r) => r.json())
-          .then((data) => {
-            console.log(data);
-            return data;
+          const presign = await fetch(process.env.NEXT_PUBLIC_API + "/presign", {
+            method: "POST",
+            headers: { "Content-type": "Application/json" },
+            body: JSON.stringify({
+              filename: f.name,
+              content_type: f.type || "video/mp4",
+            }),
           })
-          .catch((e) => {
-            console.error("Upload error:", e);
+            .then((r) => r.json())
+            .then((data) => {
+              console.log(data);
+              return data;
+            })
+            .catch((e) => {
+              console.error("Upload error:", e);
+            });
+
+          // upload directly to S3
+          await fetch(presign.upload_url, {
+            method: "PUT",
+            headers: { "Content-Type": f.type || "application/octet-stream" },
+            body: f,
           });
 
-        // upload directly to S3
-        await fetch(presign.upload_url, {
-          method: "PUT",
-          headers: { "Content-Type": f.type || "application/octet-stream" },
-          body: f,
-        });
-
-        // now get the s3_uri path
-        await fetch(process.env.NEXT_PUBLIC_API + "/process", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ video_path: presign.s3_uri }),
-        });
-        setStatus("done");
+          // now get the s3_uri path
+          await fetch(process.env.NEXT_PUBLIC_API + "/process", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ video_path: presign.s3_uri }),
+          });
+          setStatus("done");
       } else if (type === "photo") {
         const form = new FormData();
         form.append(
