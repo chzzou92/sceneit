@@ -12,7 +12,7 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         source_s3_uri:
-          "s3://sceneit-chriszou-001/videos/b521e513424a08b7fda291ce2c9acf299df49447bb9e392a274b53fd54057132/Walk_on_Water_Trailer_1.mov",
+          "s3://sceneit-chriszou-001/videos/Glizzy_Advertisement.mov-1eca589e2470b39f4f85ac376dc53f4faea0ce760e19acaa1ed455718a666c3c/Glizzy_Advertisement.mov",
         threshold: 22.0,
         min_scene_len: 12,
         split_clips: true,
@@ -29,7 +29,7 @@ export default function Home() {
       "s3://sceneit-chriszou-001/videos/b521e513424a08b7fda291ce2c9acf299df49447bb9e392a274b53fd54057132/Walk_on_Water_Trailer_1.mov"
     );
     form.append("text_search", searchText);
-    form.append("top_k", String(10));
+    form.append("top_k", String(11));
 
     const resp = await fetch(
       `${process.env.NEXT_PUBLIC_API}/search_embeddings`,

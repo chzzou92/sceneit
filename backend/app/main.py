@@ -104,7 +104,8 @@ def safe_name(name:str) -> str:
 def presign(req: PresignReq):
     # videos/<hashKey>/<original-filename>
     fname = safe_name(req.filename)
-    key_path = f"videos/{req.key}/{fname}"
+    key_path = f"videos/{fname}-{req.key}/{fname}"
+
     try: 
         s3.head_object(Bucket=S3_BUCKET, Key=key_path)
         return {
@@ -128,7 +129,7 @@ def presign(req: PresignReq):
             "upload_url": url,                                        # PUT here from browser
             "s3_uri":     f"s3://{S3_BUCKET}/{key_path}",                  # stable path for backend
             "http_url":   f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key_path}",
-            "key":        req.key
+            "key":        key_path
         }
         else:
             # Handle other potential errors (e.g., permissions, connectivity)
@@ -207,6 +208,7 @@ class SplitShotsResponse(BaseModel):
     already_processed: bool
     output_prefix: Optional[str] = ""
     manifest_s3_uri: Optional[str] = ""
+    pc_namespace: Optional[str]= ""
 
 # ---------- Core Shot Detection ----------
 
@@ -497,8 +499,23 @@ def split_shots(req: SplitShotsRequest):
             s3.upload_file(p, bucket, dest_key, ExtraArgs={"ContentType": "image/jpeg"})
             uris.append(f"s3://{bucket}/{dest_key}")
         thumb_s3_uris_by_scene.append(uris)
+    # 8) create embeddings / put in Pinecone 
+    if thumb_paths_by_scene: 
+        flat_thumb_paths = [p for scene in thumb_paths_by_scene for p in scene]
+        flat_embeds = create_embeddings(flat_thumb_paths)
+    counts = [len(shot) for shot in thumb_paths_by_scene]
+    thumb_embeddings = []
+    i = 0
+    for c in counts:
+        thumb_embeddings.append(flat_embeds[i:i+c])
+        i += c
+    thumb_timepoints = []
+    for (start_s, end_s, start_f, end_f) in shots:
+        times = pick_timepoints(start_s, end_s, count=3)
+        thumb_timepoints.append(times)
 
-    # 8) Write a small manifest.json for idempotency and UI
+    put_embeddings(thumb_embeddings=thumb_embeddings, thumb_timepoints=thumb_timepoints, source=req.source_s3_uri, shots=shots)
+    # 9) Write a small manifest.json for idempotency and UI
     manifest = {
         "source": f"s3://{bucket}/{key_path}",
         "outputs": {
@@ -527,5 +544,7 @@ def split_shots(req: SplitShotsRequest):
             start_time=s[0], end_time=s[1],
             start_frame=s[2], end_frame=s[3]
         ) for s in shots], 
-        thumbnail_s3_uris_by_scene=thumb_s3_uris_by_scene
+        thumbnail_s3_uris_by_scene=thumb_s3_uris_by_scene,
+        thumb_embeddings=thumb_embeddings,
+        pc_namespace=video_id_from_s3_uri(req.source_s3_uri)
     )
