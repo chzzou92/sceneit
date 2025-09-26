@@ -10,9 +10,9 @@ type UploaderProps = {
 
 export default function Uploader({ type }: UploaderProps) {
   const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState<"idle" | "uploading" | "done" | "error">(
-    "idle"
-  );
+  const [status, setStatus] = useState<
+    "idle" | "uploading" | "done" | "error" | "already_in"
+  >("idle");
 
   async function sha256VideoFile(file: File): Promise<string> {
     const hasher = await createSHA256();
@@ -28,32 +28,38 @@ export default function Uploader({ type }: UploaderProps) {
     return hasher.digest("hex");
   }
 
-  const onFileSelect = (f: File) => {
+  const onFileSelect = async (f: File) => {
+    const sha256 = await sha256VideoFile(f);
+    console.log("Hash:", sha256);
+
     setFile(f);
-    void uploadFile(f);
+    void uploadFile(f, sha256);
   };
 
-  const uploadFile = async (f: File) => {
+  const uploadFile = async (f: File, hash: String) => {
     setStatus("uploading");
     try {
       if (type === "video") {
-          const presign = await fetch(process.env.NEXT_PUBLIC_API + "/presign", {
-            method: "POST",
-            headers: { "Content-type": "Application/json" },
-            body: JSON.stringify({
-              filename: f.name,
-              content_type: f.type || "video/mp4",
-            }),
+        const presign = await fetch(process.env.NEXT_PUBLIC_API + "/presign", {
+          method: "POST",
+          headers: { "Content-type": "Application/json" },
+          body: JSON.stringify({
+            filename: f.name,
+            key: hash,
+            content_type: f.type || "video/mp4",
+          }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            console.log(data);
+            return data;
           })
-            .then((r) => r.json())
-            .then((data) => {
-              console.log(data);
-              return data;
-            })
-            .catch((e) => {
-              console.error("Upload error:", e);
-            });
-
+          .catch((e) => {
+            console.error("Upload error:", e);
+          });
+        if ("Res" in presign) {
+          setStatus("already_in");
+        } else {
           // upload directly to S3
           await fetch(presign.upload_url, {
             method: "PUT",
@@ -68,6 +74,7 @@ export default function Uploader({ type }: UploaderProps) {
             body: JSON.stringify({ video_path: presign.s3_uri }),
           });
           setStatus("done");
+        }
       } else if (type === "photo") {
         const form = new FormData();
         form.append(

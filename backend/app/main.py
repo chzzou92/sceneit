@@ -17,6 +17,8 @@ from transformers import CLIPProcessor, CLIPModel
 import torch
 import hashlib
 from io import BytesIO
+from botocore.exceptions import ClientError
+import re
 
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector  # or AdaptiveDetector
@@ -64,6 +66,7 @@ s3 = boto3.client("s3", region_name=AWS_REGION)
 class PresignReq(BaseModel):
     filename: str
     content_type: str | None = "video/mp4"
+    key: str 
 
 class ProcessReq(BaseModel):
   video_path: str  # can be "s3://bucket/key" or local path
@@ -93,26 +96,47 @@ def resolve_local_video(path: str) -> tuple[str, str|None, str|None]:
         return local, bucket, key
     return path, None, None
 
+def safe_name(name:str) -> str: 
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "file.bin"
+
 @app.post("/presign")
 def presign(req: PresignReq):
-    ext = Path(req.filename).suffix or ".mp4"
-    key = f"{S3_PREFIX}{uuid4()}{ext}"
-    
-    url = s3.generate_presigned_url(
-        ClientMethod="put_object",
-        Params={
-            "Bucket": S3_BUCKET,
-            "Key": key,
-            "ContentType": req.content_type or "application/octet-stream",
-        },
-        ExpiresIn=600
-    )
-    return {
-        "upload_url": url,                                        # PUT here from browser
-        "s3_uri":     f"s3://{S3_BUCKET}/{key}",                  # stable path for backend
-        "http_url":   f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key}",
-        "key":        key
-    }
+    # videos/<hashKey>/<original-filename>
+    fname = safe_name(req.filename)
+    key_path = f"videos/{req.key}/{fname}"
+    try: 
+        s3.head_object(Bucket=S3_BUCKET, Key=key_path)
+        return {
+            "exists": True,
+            "s3_uri":   f"s3://{S3_BUCKET}/{key_path}",
+            "http_url": f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key_path}",
+            "key":      key_path,
+        }
+    except ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            url = s3.generate_presigned_url(
+                ClientMethod="put_object",
+                Params={
+                    "Bucket": S3_BUCKET,
+                    "Key": key_path,
+                    "ContentType": req.content_type or "application/octet-stream",
+                },
+                ExpiresIn=600
+            )
+            return {
+            "upload_url": url,                                        # PUT here from browser
+            "s3_uri":     f"s3://{S3_BUCKET}/{key_path}",                  # stable path for backend
+            "http_url":   f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key_path}",
+            "key":        req.key
+        }
+        else:
+            # Handle other potential errors (e.g., permissions, connectivity)
+            return {
+                "error": f"Error checking object '{req.key}' in bucket '{S3_BUCKET}': {e}"
+            }
+
+
+        
 
 
 # ---------- Config / Helpers ----------
