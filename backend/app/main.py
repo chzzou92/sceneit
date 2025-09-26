@@ -19,6 +19,7 @@ import hashlib
 from io import BytesIO
 from botocore.exceptions import ClientError
 import re
+import json
 
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector  # or AdaptiveDetector
@@ -136,9 +137,7 @@ def presign(req: PresignReq):
             }
 
 
-        
-
-
+    
 # ---------- Config / Helpers ----------
 
 def parse_s3_uri(s3_uri: str):
@@ -150,6 +149,18 @@ def parse_s3_uri(s3_uri: str):
     if not bucket or not key:
         raise ValueError("Invalid S3 URI; expected s3://bucket/key")
     return bucket, key
+
+def s3_key_exists(bucket: str, key: str) -> bool:
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "404":
+            return False
+        raise
+def any_under_prefix(bucket: str, prefix: str) -> bool:
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    return resp.get("KeyCount", 0) > 0
 
 def s3_download(s3_uri: str, local_path: str):
     bucket, key = parse_s3_uri(s3_uri)
@@ -182,8 +193,6 @@ class SplitShotsRequest(BaseModel):
     min_scene_len: int = Field(4, description="Minimum scene length in frames (e.g., at 24fps)")
     # Whether to actually cut clips (requires ffmpeg)
     split_clips: bool = Field(True, description="If true, export per-shot clips via ffmpeg.")
-    # Where to upload results if split_clips is True
-    output_prefix_s3: Optional[str] = Field(None, description="e.g., s3://my-bucket/outputs/my-video/")
 
 class ShotBoundary(BaseModel):
     start_time: float  # seconds
@@ -195,6 +204,9 @@ class SplitShotsResponse(BaseModel):
     shots: List[ShotBoundary]
     thumbnail_s3_uris_by_scene: Optional[List[List[str]]] = None
     thumb_embeddings: Optional[List[List[List[float]]]] = None
+    already_processed: bool
+    output_prefix: Optional[str] = ""
+    manifest_s3_uri: Optional[str] = ""
 
 # ---------- Core Shot Detection ----------
 
@@ -388,107 +400,132 @@ async def search_embeddings(
 @app.post("/split_shots", response_model=SplitShotsResponse)
 def split_shots(req: SplitShotsRequest):
     tmp_dir = tempfile.mkdtemp(prefix="scenes_")
-    try:
-        # --- decide a local filename with the same extension as S3 key ---
-        _, key = parse_s3_uri(req.source_s3_uri)
-        ext = os.path.splitext(key)[1] or ".mp4"
-        local_video = os.path.join(tmp_dir, f"input-{uuid4().hex}{ext}")
+    bucket, key_path = parse_s3_uri(req.source_s3_uri)
 
-        # --- download the video from S3 BEFORE detection ---
-        s3_download(req.source_s3_uri, local_video)
+    # 1) Ensure the source video exists
+    if not s3_key_exists(bucket, key_path):
+        raise HTTPException(status_code=404, detail=f"Video not found in S3: s3://{bucket}/{key_path}")
 
-        # --- detect scenes once; reuse scene_list for splitting ---
-        scene_list, shots = detect_scenes(
-            video_path=local_video,
-            threshold=req.threshold,
-            min_scene_len=req.min_scene_len
-        )
+    # 2) Derive base prefix for all outputs: "videos/<hash>/"
+    base_prefix = f"{key_path}/"       # e.g., "videos/<hash>/"
+    clips_prefix = base_prefix + "clips/"                      # or "frames/" if you prefer frames-only
+    thumbs_prefix = base_prefix + "thumbnails/"
+    manifest_key = base_prefix + "manifest.json"
 
-        # timestamps-only path
-        if not req.split_clips:
-            return SplitShotsResponse(
-                shots=[ShotBoundary(
-                    start_time=s[0], end_time=s[1],
-                    start_frame=s[2], end_frame=s[3]
-                ) for s in shots]
-            )
-
-        # --- split clips ---
-        ensure_ffmpeg()
-        out_dir = os.path.join(tmp_dir, "out")
-        os.makedirs(out_dir, exist_ok=True)
-        output_template = os.path.join(out_dir, "shot-$SCENE_NUMBER.mp4")
-
-        split_video_ffmpeg(
-            input_video_path=local_video,
-            scene_list=scene_list,
-            output_file_template=output_template
-        )
-        # make thumbs 
-        thumb_out_dir = os.path.join(tmp_dir, "thumbs")
-        thumb_paths_by_scene = make_scene_thumbnails(
-            video_path=local_video,
-            shots=shots,          # your (start_s, end_s, start_f, end_f) tuples
-            out_dir=thumb_out_dir,
-            per_scene=3,          # 2 or 3, your call
-            basename="shot"
-        )
-        logging.info(f"Made {sum(len(x) for x in thumb_paths_by_scene)} thumbnails "
-                    f"across {len(thumb_paths_by_scene)} scenes at {thumb_out_dir}")
-
-        # # --- optionally upload to S3 ---
-        # clip_s3_uris = None
-        if req.output_prefix_s3:
-            prefix = req.output_prefix_s3 if req.output_prefix_s3.endswith("/") else req.output_prefix_s3 + "/"
-        #     created = sorted(
-        #         f for f in os.listdir(out_dir)
-        #         if f.startswith("shot-") and f.endswith(".mp4")
-        #     )
-        #     clip_s3_uris = []
-        #     for filename in created:
-        #         local_path = os.path.join(out_dir, filename)
-        #         dest_uri = prefix + filename
-        #         s3_upload(local_path, dest_uri)
-        #         clip_s3_uris.append(dest_uri)
-            
-            # thumbs_prefix = prefix + "thumbnails/"
-            # logging.info(f"Uploading thumbnails to {thumbs_prefix}")
-            # thumbnail_s3_uris_by_scene = []
-            # for scene_paths in thumb_paths_by_scene:
-            #     uris = []
-            #     for p in scene_paths:
-            #         dest_uri = thumbs_prefix + os.path.basename(p)
-            #         bucket, k = parse_s3_uri(dest_uri)
-            #         boto3.client("s3").upload_file(
-            #             p, bucket, k, ExtraArgs={"ContentType": "image/jpeg"}
-            #         )
-            #         uris.append(dest_uri)
-            #     thumbnail_s3_uris_by_scene.append(uris)
-        
-        if thumb_paths_by_scene: 
-            flat_thumb_paths = [p for scene in thumb_paths_by_scene for p in scene]
-            flat_embeds = create_embeddings(flat_thumb_paths)
-        counts = [len(scene) for scene in thumb_paths_by_scene]
-        thumb_embeddings = []
-        i = 0
-        for c in counts:
-            thumb_embeddings.append(flat_embeds[i:i+c])
-            i += c
-        thumb_timepoints = []
-        for (start_s, end_s, start_f, end_f) in shots:
-            times = pick_timepoints(start_s, end_s, count=3)
-            thumb_timepoints.append(times)
-
-        put_embeddings(thumb_embeddings=thumb_embeddings, thumb_timepoints=thumb_timepoints, source=req.source_s3_uri, shots=shots)
+    # 3) Short-circuit if we've already processed this video
+    # Preferred: single manifest file as the idempotency marker
+    if s3_key_exists(bucket, manifest_key):
+        # Already processed; return minimal response (or load manifest and return full)
         return SplitShotsResponse(
+            already_processed=True,
+            output_prefix=f"s3://{bucket}/{base_prefix}",
+            manifest_s3_uri=f"s3://{bucket}/{manifest_key}",
+            shots=[]
+        )
+
+    # Fallback: if you don't write a manifest yet, detect any existing outputs
+    if any_under_prefix(bucket, thumbs_prefix) or any_under_prefix(bucket, clips_prefix):
+        return SplitShotsResponse(
+            already_processed=True,
+            output_prefix=f"s3://{bucket}/{base_prefix}",
+            manifest_s3_uri=None,
+            shots=[]
+        )
+
+    # 4) Download the source video locally
+    ext = os.path.splitext(key_path)[1] or ".mp4"
+    local_video = os.path.join(tmp_dir, f"input-{uuid4().hex}{ext}")
+    s3.download_file(bucket, key_path, local_video)
+
+    # 5) Detect scenes
+    scene_list, shots = detect_scenes(
+        video_path=local_video,
+        threshold=req.threshold,
+        min_scene_len=req.min_scene_len
+    )
+
+    if not req.split_clips:
+        return SplitShotsResponse(
+            already_processed=False,
+            output_prefix=f"s3://{bucket}/{base_prefix}",
             shots=[ShotBoundary(
                 start_time=s[0], end_time=s[1],
                 start_frame=s[2], end_frame=s[3]
-            ) for s in shots], thumbnail_s3_uris_by_scene=None,
-            thumb_embeddings=thumb_embeddings
+            ) for s in shots]
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    # 6) Actually split and make thumbnails
+    ensure_ffmpeg()
+
+    out_dir = os.path.join(tmp_dir, "out")
+    os.makedirs(out_dir, exist_ok=True)
+    output_template = os.path.join(out_dir, "shot-$SCENE_NUMBER.mp4")
+
+    split_video_ffmpeg(
+        input_video_path=local_video,
+        scene_list=scene_list,
+        output_file_template=output_template
+    )
+
+    thumb_out_dir = os.path.join(tmp_dir, "thumbs")
+    thumb_paths_by_scene = make_scene_thumbnails(
+        video_path=local_video,
+        shots=shots,
+        out_dir=thumb_out_dir,
+        per_scene=3,
+        basename="shot"
+    )
+
+    # 7) Upload outputs under the SAME video folder
+    clip_s3_uris, thumb_s3_uris_by_scene = [], []
+
+    # created = sorted(
+    #     f for f in os.listdir(out_dir)
+    #     if f.startswith("shot-") and f.endswith(".mp4")
+    # )
+
+    # for filename in created:
+    #     local_path = os.path.join(out_dir, filename)
+    #     dest_key = clips_prefix + filename
+    #     s3.upload_file(local_path, bucket, dest_key, ExtraArgs={"ContentType": "video/mp4"})
+    #     clip_s3_uris.append(f"s3://{bucket}/{dest_key}")
+
+    for scene_paths in thumb_paths_by_scene:
+        uris = []
+        for p in scene_paths:
+            dest_key = thumbs_prefix + os.path.basename(p)
+            s3.upload_file(p, bucket, dest_key, ExtraArgs={"ContentType": "image/jpeg"})
+            uris.append(f"s3://{bucket}/{dest_key}")
+        thumb_s3_uris_by_scene.append(uris)
+
+    # 8) Write a small manifest.json for idempotency and UI
+    manifest = {
+        "source": f"s3://{bucket}/{key_path}",
+        "outputs": {
+            "clips_prefix": f"s3://{bucket}/{clips_prefix}",
+            "thumbnails_prefix": f"s3://{bucket}/{thumbs_prefix}",
+            "clips": clip_s3_uris,
+            "thumbnails": thumb_s3_uris_by_scene,
+        },
+        "shots": [
+            {"start_time": s[0], "end_time": s[1], "start_frame": s[2], "end_frame": s[3]}
+            for s in shots
+        ],
+    }
+    s3.put_object(
+        Bucket=bucket,
+        Key=manifest_key,
+        Body=json.dumps(manifest).encode("utf-8"),
+        ContentType="application/json"
+    )
+
+    return SplitShotsResponse(
+        already_processed=False,
+        output_prefix=f"s3://{bucket}/{base_prefix}",
+        manifest_s3_uri=f"s3://{bucket}/{manifest_key}",
+        shots=[ShotBoundary(
+            start_time=s[0], end_time=s[1],
+            start_frame=s[2], end_frame=s[3]
+        ) for s in shots], 
+        thumbnail_s3_uris_by_scene=thumb_s3_uris_by_scene
+    )

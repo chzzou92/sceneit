@@ -12,11 +12,10 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         source_s3_uri:
-          "s3://sceneit-chriszou-001/uploads918c75ff-d0c2-4401-abd5-4e0fc586e357.mov",
+          "s3://sceneit-chriszou-001/videos/b521e513424a08b7fda291ce2c9acf299df49447bb9e392a274b53fd54057132/Walk_on_Water_Trailer_1.mov",
         threshold: 22.0,
         min_scene_len: 12,
         split_clips: true,
-        output_prefix_s3: "s3://sceneit-chriszou-001/outputs/video1/",
       }),
     });
     const data = await resp.json();
@@ -27,7 +26,7 @@ export default function Home() {
     const form = new FormData();
     form.append(
       "filename",
-      "s3://sceneit-chriszou-001/uploads918c75ff-d0c2-4401-abd5-4e0fc586e357.mov"
+      "s3://sceneit-chriszou-001/videos/b521e513424a08b7fda291ce2c9acf299df49447bb9e392a274b53fd54057132/Walk_on_Water_Trailer_1.mov"
     );
     form.append("text_search", searchText);
     form.append("top_k", String(10));
