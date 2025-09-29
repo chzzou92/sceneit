@@ -36,7 +36,7 @@ const StyledWrapper = styled.div`
   .input:focus {
     background-color: white;
     transform: scale(1.05);
-    box-shadow: 13px 13px 100px #969696, -13px -13px 100px #ffffff;
+    box-shadow: 13px 13px 100px #969696, 0px 0px 50px #ffffff;
   }
 `;
 

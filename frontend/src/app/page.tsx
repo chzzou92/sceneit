@@ -3,9 +3,11 @@ import Image from "next/image";
 import Uploader from "./Uploader";
 import SearchInput from "@/components/SearchInput";
 import react, { useState } from "react";
+import VideoPlayer from "@/components/VideoPlayer";
+
 export default function Home() {
   const [searchText, setSearchText] = useState("");
-
+  const [videoUrl, setVideoUrl] = useState(null);
   const testShots = async () => {
     const resp = await fetch(process.env.NEXT_PUBLIC_API + "/split_shots", {
       method: "POST",
@@ -26,7 +28,7 @@ export default function Home() {
     const form = new FormData();
     form.append(
       "filename",
-      "s3://sceneit-chriszou-001/videos/b521e513424a08b7fda291ce2c9acf299df49447bb9e392a274b53fd54057132/Walk_on_Water_Trailer_1.mov"
+      "s3://sceneit-chriszou-001/videos/Walk_on_Water_Trailer_1.mov-b521e513424a08b7fda291ce2c9acf299df49447bb9e392a274b53fd54057132/Walk_on_Water_Trailer_1.mov"
     );
     form.append("text_search", searchText);
     form.append("top_k", String(11));
@@ -35,7 +37,7 @@ export default function Home() {
       `${process.env.NEXT_PUBLIC_API}/search_embeddings`,
       {
         method: "POST",
-        body: form, 
+        body: form,
       }
     );
 
@@ -52,13 +54,14 @@ export default function Home() {
       <main className="flex flex-col gap-20 row-start-2 items-center sm:items-start ">
         <h1 className="text-2xl font-bold">SceneIt</h1>
         <div className="flex flex-col gap-4 items-centersm:flex-row">
-          <Uploader type="video" />
+          <Uploader type="video" setUrl={setVideoUrl}/>
           <button
             className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full"
             onClick={testShots}
           >
             Split Shots
           </button>
+          {videoUrl ? <VideoPlayer src={videoUrl} /> : ""}
           <div className="flex flex-row w-full gap-1">
             <SearchInput text={searchText} setText={setSearchText} />
             <button
@@ -69,7 +72,7 @@ export default function Home() {
             </button>
           </div>
           <div className="py-12">
-            <Uploader type="photo" />
+            <Uploader type="photo" setUrl={setVideoUrl}/>
           </div>
         </div>
       </main>

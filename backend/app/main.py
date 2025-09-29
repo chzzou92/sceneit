@@ -108,10 +108,16 @@ def presign(req: PresignReq):
 
     try: 
         s3.head_object(Bucket=S3_BUCKET, Key=key_path)
+        get_url = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": S3_BUCKET, "Key": key_path},
+            ExpiresIn=3600  # 1 hour
+        )
         return {
             "exists": True,
             "s3_uri":   f"s3://{S3_BUCKET}/{key_path}",
             "http_url": f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key_path}",
+            "get_url":  get_url,  
             "key":      key_path,
         }
     except ClientError as e:
