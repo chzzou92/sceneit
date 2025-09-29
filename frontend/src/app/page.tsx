@@ -9,10 +9,12 @@ import { AnimatePresence, motion } from "framer-motion";
 import { video } from "framer-motion/client";
 
 export default function Home() {
+  const [errorType, setErrorType] = useState("");
   const [searchText, setSearchText] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
   const [textError, setTextError] = useState(false);
   const [searchTextUrl, setSearchTextUrl] = useState("");
+  const [startPoint, setStartPoint] = useState(0);
   const testShots = async () => {
     const resp = await fetch(process.env.NEXT_PUBLIC_API + "/split_shots", {
       method: "POST",
@@ -29,8 +31,12 @@ export default function Home() {
   };
 
   const getSearchText = async () => {
-    if (searchText === "" || searchTextUrl === "") {
+    if (searchText === "") {
       setTextError(true);
+      setErrorType("no-text");
+    } else if (searchTextUrl === "") {
+      setTextError(true);
+      setErrorType("no-url");
     } else {
       setTextError(false);
       const form = new FormData();
@@ -53,6 +59,7 @@ export default function Home() {
       }
       const data = await resp.json();
       console.log(data);
+      setStartPoint(data.matches[0].metadata.t_sec)
     }
   };
 
@@ -72,7 +79,7 @@ export default function Home() {
           >
             Split Shots
           </button>
-          {videoUrl != "" ? <VideoPlayer src={videoUrl} /> : ""}
+          {videoUrl != "" ? <VideoPlayer src={videoUrl} startAt={startPoint} autoPlayOnSeek={false}/> : ""}
           <div className="flex flex-col gap-2">
             <div className="flex flex-row w-full gap-1">
               <SearchInput text={searchText} setText={setSearchText} />
@@ -93,7 +100,7 @@ export default function Home() {
                   transition={{ duration: 0.3 }}
                   style={{ position: "relative" }}
                 >
-                  <ErrorCard type="no-text" />
+                  <ErrorCard type={errorType} />
                 </motion.div>
               )}
             </AnimatePresence>

@@ -1,73 +1,62 @@
 "use client";
-import React, { useEffect, useRef } from "react";
-
-type Marker = { label: string; t: number }; // seconds
+import React, { useEffect, useRef, memo } from "react";
 
 type Props = {
-  src: string;               // S3 public URL or presigned GET URL
-  startAt?: number;          // optional initial time (seconds)
-  markers?: Marker[];        // optional jump points (shots/frames)
+  src: string;         // presigned GET or public URL
+  startAt?: number;    // seconds; can change often
+  autoPlayOnSeek?: boolean;
   className?: string;
 };
 
-export default function VideoPlayer({ src, startAt = 0, markers = [], className }: Props) {
+function VideoPlayerBase({ src, startAt = 0, autoPlayOnSeek = false, className }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Seek to startAt once metadata is loaded (duration known)
+  // set src once; changing src will reload the media
+  // (if src changes, we’ll seek after metadata loads below)
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const onLoaded = () => {
-      if (startAt > 0) {
-        v.currentTime = startAt;
+    v.src = src;
+  }, [src]);
+
+  // seek when startAt changes (without re-mounting the video)
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+
+    const applySeek = () => {
+      if (Number.isFinite(startAt) && startAt >= 0 && v.duration) {
+        v.currentTime = Math.min(startAt, v.duration - 0.001);
+        if (autoPlayOnSeek) {
+          v.play().catch(() => {/* ignore autoplay block */});
+        }
       }
     };
-    v.addEventListener("loadedmetadata", onLoaded);
-    return () => v.removeEventListener("loadedmetadata", onLoaded);
-  }, [startAt]);
 
-  // Optional: support deep-link ?t=123
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const url = new URL(window.location.href);
-    const tParam = url.searchParams.get("t");
-    if (tParam) {
-      const t = parseFloat(tParam);
-      if (!Number.isNaN(t)) {
-        const onLoaded = () => { v.currentTime = t; };
-        v.addEventListener("loadedmetadata", onLoaded, { once: true });
-      }
+    // If metadata already known, seek immediately; else wait once
+    if (v.readyState >= 1) {
+      applySeek();
+    } else {
+      const once = () => { applySeek(); v.removeEventListener("loadedmetadata", once); };
+      v.addEventListener("loadedmetadata", once);
+      return () => v.removeEventListener("loadedmetadata", once);
     }
-  }, []);
-
-  const jumpTo = (t: number) => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.currentTime = Math.max(0, t);
-    v.play().catch(() => {}); // ignore autoplay restrictions
-  };
+  }, [startAt, autoPlayOnSeek]);
 
   return (
-    <div className={className}>
-      <video
-        ref={videoRef}
-        src={src}
-        controls
-        preload="metadata"
-        playsInline
-        crossOrigin="anonymous" // helpful if you’ll draw frames to <canvas> later
-        style={{ width: "100%", borderRadius: 8 }}
-      />
-      {markers.length > 0 && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-          {markers.map((m, i) => (
-            <button key={i} onClick={() => jumpTo(m.t)} style={{ padding: "6px 10px" }}>
-              {m.label} ({m.t.toFixed(1)}s)
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+    <video
+      ref={videoRef}
+      controls
+      preload="metadata"
+      playsInline
+      style={{ width: "100%", borderRadius: 8 }}
+      // keep crossOrigin if you plan to draw frames to canvas
+      crossOrigin="anonymous"
+      className={className}
+    />
   );
 }
+
+// Optional: avoid unnecessary child re-renders when parent state changes unrelated to props
+const VideoPlayer = memo(VideoPlayerBase);
+export default VideoPlayer;
