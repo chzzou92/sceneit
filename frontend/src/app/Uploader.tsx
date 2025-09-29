@@ -6,10 +6,11 @@ import { create } from "domain";
 
 type UploaderProps = {
   type: "video" | "photo";
-  setUrl: React.Dispatch<React.SetStateAction<null>>  
+  setUrl: React.Dispatch<React.SetStateAction<string>>  ;
+  setS3Uri: React.Dispatch<React.SetStateAction<string>>  ;
 };
 
-export default function Uploader({ type, setUrl }: UploaderProps) {
+export default function Uploader({ type, setUrl, setS3Uri }: UploaderProps) {
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<
     "idle" | "uploading" | "done" | "error" | "already_in"
@@ -60,6 +61,7 @@ export default function Uploader({ type, setUrl }: UploaderProps) {
           });
         if (presign?.exists === true) {
           setUrl(presign.get_url);
+          setS3Uri(presign.s3_uri);
           setStatus("already_in");
         } else {
           // upload directly to S3

@@ -521,6 +521,7 @@ def split_shots(req: SplitShotsRequest):
         thumb_timepoints.append(times)
 
     put_embeddings(thumb_embeddings=thumb_embeddings, thumb_timepoints=thumb_timepoints, source=req.source_s3_uri, shots=shots)
+    
     # 9) Write a small manifest.json for idempotency and UI
     manifest = {
         "source": f"s3://{bucket}/{key_path}",

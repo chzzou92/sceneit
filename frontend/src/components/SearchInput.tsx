@@ -26,6 +26,7 @@ const StyledWrapper = styled.div`
   .input {
     border: none;
     outline: none;
+    color: black;
     border-radius: 15px;
     padding: 1em;
     background-color: #ccc;
