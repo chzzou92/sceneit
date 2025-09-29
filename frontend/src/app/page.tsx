@@ -20,7 +20,7 @@ export default function Home() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        source_s3_uri: videoUrl,
+        source_s3_uri: searchTextUrl,
         threshold: 22.0,
         min_scene_len: 12,
         split_clips: true,

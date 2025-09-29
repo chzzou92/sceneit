@@ -6,8 +6,8 @@ import { create } from "domain";
 
 type UploaderProps = {
   type: "video" | "photo";
-  setUrl: React.Dispatch<React.SetStateAction<string>>  ;
-  setS3Uri: React.Dispatch<React.SetStateAction<string>>  ;
+  setUrl: React.Dispatch<React.SetStateAction<string>>;
+  setS3Uri: React.Dispatch<React.SetStateAction<string>>;
 };
 
 export default function Uploader({ type, setUrl, setS3Uri }: UploaderProps) {
@@ -59,9 +59,9 @@ export default function Uploader({ type, setUrl, setS3Uri }: UploaderProps) {
           .catch((e) => {
             console.error("Upload error:", e);
           });
+        setS3Uri(presign.s3_uri);
         if (presign?.exists === true) {
           setUrl(presign.get_url);
-          setS3Uri(presign.s3_uri);
           setStatus("already_in");
         } else {
           // upload directly to S3
@@ -70,13 +70,15 @@ export default function Uploader({ type, setUrl, setS3Uri }: UploaderProps) {
             headers: { "Content-Type": f.type || "application/octet-stream" },
             body: f,
           });
+          setUrl(presign.get_url);
+          console.log(presign);
 
           // now get the s3_uri path
-          await fetch(process.env.NEXT_PUBLIC_API + "/process", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ video_path: presign.s3_uri }),
-          });
+          // await fetch(process.env.NEXT_PUBLIC_API + "/process", {
+          //   method: "POST",
+          //   headers: { "Content-Type": "application/json" },
+          //   body: JSON.stringify({ video_path: presign.s3_uri }),
+          // });
           setStatus("done");
         }
       } else if (type === "photo") {

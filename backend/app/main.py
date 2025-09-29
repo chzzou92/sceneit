@@ -108,41 +108,39 @@ def presign(req: PresignReq):
 
     try: 
         s3.head_object(Bucket=S3_BUCKET, Key=key_path)
-        get_url = s3.generate_presigned_url(
-            ClientMethod="get_object",
-            Params={"Bucket": S3_BUCKET, "Key": key_path},
-            ExpiresIn=3600  # 1 hour
-        )
-        return {
-            "exists": True,
-            "s3_uri":   f"s3://{S3_BUCKET}/{key_path}",
-            "http_url": f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key_path}",
-            "get_url":  get_url,  
-            "key":      key_path,
-        }
+        exists = True
     except ClientError as e:
         if e.response['Error']['Code'] == '404':
-            url = s3.generate_presigned_url(
-                ClientMethod="put_object",
-                Params={
-                    "Bucket": S3_BUCKET,
+            exists = False 
+        else:
+            raise
+# Always create a GET presigned URL (for playback)
+    get_url = s3.generate_presigned_url(
+        ClientMethod="get_object",
+        Params={"Bucket": S3_BUCKET, "Key": key_path},
+        ExpiresIn=3600
+    )
+
+    # If it doesn’t exist, also create a PUT presigned URL (for upload)
+    upload_url = None
+    if not exists:
+        upload_url = s3.generate_presigned_url(
+            ClientMethod="put_object",
+            Params={"Bucket": S3_BUCKET, 
                     "Key": key_path,
                     "ContentType": req.content_type or "application/octet-stream",
-                },
-                ExpiresIn=600
-            )
-            return {
-            "upload_url": url,                                        # PUT here from browser
-            "s3_uri":     f"s3://{S3_BUCKET}/{key_path}",                  # stable path for backend
-            "http_url":   f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key_path}",
-            "key":        key_path
-        }
-        else:
-            # Handle other potential errors (e.g., permissions, connectivity)
-            return {
-                "error": f"Error checking object '{req.key}' in bucket '{S3_BUCKET}': {e}"
-            }
+            },
+            ExpiresIn=3600
+        )
 
+    return {
+        "exists": exists,
+        "s3_uri": f"s3://{S3_BUCKET}/{key_path}",
+        "http_url": f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key_path}",
+        "get_url": get_url,
+        "upload_url": upload_url,  # may be None if already exists
+        "key": key_path,
+    }
 
     
 # ---------- Config / Helpers ----------
