@@ -8,9 +8,15 @@ type UploaderProps = {
   type: "video" | "photo";
   setUrl: React.Dispatch<React.SetStateAction<string>>;
   setS3Uri: React.Dispatch<React.SetStateAction<string>>;
+  setNextPage: React.Dispatch<React.SetStateAction<boolean>>;
 };
 
-export default function Uploader({ type, setUrl, setS3Uri }: UploaderProps) {
+export default function Uploader({
+  type,
+  setUrl,
+  setS3Uri,
+  setNextPage,
+}: UploaderProps) {
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<
     "idle" | "uploading" | "done" | "error" | "already_in"
@@ -79,8 +85,9 @@ export default function Uploader({ type, setUrl, setS3Uri }: UploaderProps) {
           //   headers: { "Content-Type": "application/json" },
           //   body: JSON.stringify({ video_path: presign.s3_uri }),
           // });
-          setStatus("done");
         }
+        setStatus("done");
+        setNextPage(true);
       } else if (type === "photo") {
         const form = new FormData();
         form.append(

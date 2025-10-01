@@ -1,14 +1,20 @@
 import React from "react";
-interface ErrorProps{
-    type: string
+interface ErrorProps {
+  type: string;
 }
 const ErrorCard: React.FC<ErrorProps> = ({ type }) => {
   let message = "";
 
   switch (type) {
     case "no-text":
-        message = "Please add text to search";
-        break;
+      message = "Please add text to search";
+      break;
+    case "no-url":
+      message = "Please provide a video URL / S3 URI";
+      break;
+    case "already-split":
+      message = "This video is already processed.";
+      break;
     default:
       message = "An unknown error occurred";
   }
