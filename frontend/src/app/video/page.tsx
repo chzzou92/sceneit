@@ -9,6 +9,7 @@ import Uploader from "../Uploader";
 import { useRouter } from "next/navigation";
 import Loader from "@/components/Loader";
 import { setLazyProp } from "next/dist/server/api-utils";
+import S3ImageCarousel from "@/components/S3ImageCarousel";
 export default function VideoPage() {
   const sp = useSearchParams();
   const url = sp.get("url") ?? "";
@@ -18,7 +19,22 @@ export default function VideoPage() {
   const [textError, setTextError] = useState(false);
   const [searchText, setSearchText] = useState("");
   const [loading, setLoading] = useState(false);
+  const [searchTextImages, setSearchTextImages] = useState<string[]>([]);
+  const [searchTextImagesStart, setSearchTextImagesStart] = useState<number[]>([]);
   const router = useRouter();
+
+  interface Match {
+    id: string;
+    score: number;
+    metadata: {
+      thumb_s3_uri: string;
+      t_sec: number;
+    };
+  }
+
+  interface Data {
+    matches: Match[];
+  }
 
   useEffect(() => {
     if (!textError) return;
@@ -73,9 +89,16 @@ export default function VideoPage() {
         console.error("Search failed:", await resp.text());
         return;
       }
-      const data = await resp.json();
+      const data: Data = await resp.json();
       console.log(data);
       setStartPoint(data.matches[0].metadata.t_sec);
+
+      setSearchTextImages(
+        data.matches.slice(0, 7).map((match) => match.metadata.thumb_s3_uri)
+      );
+      setSearchTextImagesStart(
+        data.matches.slice(0,7).map((match) =>match.metadata.t_sec)
+      );
     }
   };
   return (
@@ -89,7 +112,7 @@ export default function VideoPage() {
         </button>
       </div>
       {loading ? (
-        <div className="absolute center">
+        <div className="absolute center z-10">
           <Loader />
         </div>
       ) : (
@@ -97,6 +120,13 @@ export default function VideoPage() {
       )}
       <div className="w-1/2 h-1/2 items-center justify-center">
         <VideoPlayer src={url} startAt={startPoint} autoPlayOnSeek={false} />
+        <S3ImageCarousel
+          urls={searchTextImages}
+          urlStartPoints={searchTextImagesStart}
+          visible={3}
+          height={130}
+          setStartPoint={setStartPoint}
+        />
         <button
           className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full"
           onClick={testShots}

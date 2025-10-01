@@ -318,15 +318,15 @@ def create_embeddings(source_list: List[str]) -> List[List[float]]:
     
     return emb_list
 
-def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: List[List[float]], source: str, shots: List[ShotBoundary]) -> None: 
+def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: List[List[float]], source: str, shots: List[ShotBoundary], thumb_s3: List[List[str]]) -> None: 
     vid = video_id_from_s3_uri(source)
     vectors = []
     index = pc.Index(index_name)
-    for scene_i, (scene_embeds, timepoints) in enumerate(zip(thumb_embeddings, thumb_timepoints)):  
+    for scene_i, (scene_embeds, timepoints, shot_uris) in enumerate(zip(thumb_embeddings, thumb_timepoints, thumb_s3)):  
         # thumb_embeddings: [scene][thumb_idx][768]
         # thumb_timepoints: [scene][thumb_idx] 
         start_s, end_s, start_f, end_f = shots[scene_i]
-        for thumb_j, (vec, t_sec) in enumerate(zip(scene_embeds, timepoints)):
+        for thumb_j, (vec, t_sec, uri) in enumerate(zip(scene_embeds, timepoints, shot_uris)):
             vec_id = f"{vid}:s{scene_i:03d}:t{thumb_j:02d}"
             meta = {
                 "video_id": vid,
@@ -338,6 +338,7 @@ def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: 
                 "end_s": float(end_s),
                 "start_f": int(start_f),
                 "end_f": int(end_f),
+                "thumb_s3_uri": uri
             }
             vectors.append((vec_id, vec, meta))
 
@@ -501,7 +502,12 @@ def split_shots(req: SplitShotsRequest):
         for p in scene_paths:
             dest_key = thumbs_prefix + os.path.basename(p)
             s3.upload_file(p, bucket, dest_key, ExtraArgs={"ContentType": "image/jpeg"})
-            uris.append(f"s3://{bucket}/{dest_key}")
+            get_url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": dest_key},
+                ExpiresIn=3600
+            )
+            uris.append(get_url)
         thumb_s3_uris_by_scene.append(uris)
     # 8) create embeddings / put in Pinecone 
     if thumb_paths_by_scene: 
@@ -518,7 +524,7 @@ def split_shots(req: SplitShotsRequest):
         times = pick_timepoints(start_s, end_s, count=3)
         thumb_timepoints.append(times)
 
-    put_embeddings(thumb_embeddings=thumb_embeddings, thumb_timepoints=thumb_timepoints, source=req.source_s3_uri, shots=shots)
+    put_embeddings(thumb_embeddings=thumb_embeddings, thumb_timepoints=thumb_timepoints, source=req.source_s3_uri, shots=shots, thumb_s3=thumb_s3_uris_by_scene)
     
     # 9) Write a small manifest.json for idempotency and UI
     manifest = {
