@@ -510,7 +510,7 @@ def split_shots(req: SplitShotsRequest):
     )
 
     # 7) Upload outputs under the SAME video folder
-    clip_s3_uris, uris_keys, thumb_keys_by_scene = [], [], []
+    clip_s3_uris,  thumb_keys_by_scene = [], []
 
     # created = sorted(
     #     f for f in os.listdir(out_dir)
@@ -524,6 +524,7 @@ def split_shots(req: SplitShotsRequest):
     #     clip_s3_uris.append(f"s3://{bucket}/{dest_key}")
     logging.info("Uploading Thumbnails")
     for scene_paths in thumb_paths_by_scene:
+        uris_keys = []
         for p in scene_paths:
             dest_key = thumbs_prefix + os.path.basename(p)
             s3.upload_file(p, bucket, dest_key, ExtraArgs={"ContentType": "image/jpeg"})
