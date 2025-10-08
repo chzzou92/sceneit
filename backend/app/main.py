@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pathlib import Path
 from uuid import uuid4
-import os, boto3, subprocess, logging
+import os, boto3, subprocess, logging, sys
 from urllib.parse import urlparse, quote
 from dotenv import load_dotenv, dotenv_values
 from pathlib import Path
@@ -27,6 +27,12 @@ from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector  # or AdaptiveDetector
 from scenedetect.video_splitter import split_video_ffmpeg
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    stream=sys.stdout,
+    force=True, 
+)
 
 DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"  # backend/.env
 if not DOTENV_PATH.exists():
@@ -59,10 +65,10 @@ AWS_REGION = os.getenv("AWS_REGION")
 S3_BUCKET  = os.getenv("S3_BUCKET")
 S3_PREFIX  = os.getenv("S3_PREFIX")
 PC_KEY = os.getenv("PINECONE_ACCESS_KEY")
-logging.warning(f"S3_BUCKET: {S3_BUCKET}")
-logging.warning(f"S3_PREFIX: {S3_PREFIX}")
-logging.warning(f"REGION: {AWS_REGION}")
-logging.warning(f"PC: {PC_KEY}")
+logging.info(f"S3_BUCKET: {S3_BUCKET}")
+logging.info(f"S3_PREFIX: {S3_PREFIX}")
+logging.info(f"REGION: {AWS_REGION}")
+logging.info(f"PC: {PC_KEY}")
 
 s3 = boto3.client("s3", region_name=AWS_REGION)
 
@@ -394,6 +400,7 @@ async def search_embeddings(
             namespace=vid,   
             include_metadata=True,
         )
+        logging.info("Seraching frames")
 
         # Convert to clean JSON
         matches = [
@@ -406,7 +413,7 @@ async def search_embeddings(
         ]
         #log a compact line per match
         for m in matches:
-            logging.warning(
+            logging.info(
                 f"{m['id']} | score={m['score']:.3f} | scene={m['metadata'].get('scene_index')} | t={m['metadata'].get('t_sec')}"
             )
         
@@ -432,11 +439,11 @@ def split_shots(req: SplitShotsRequest):
 
     # 2) Derive base prefix for all outputs: "videos/<hash>/"
     base_prefix = f"{key_path}/"       # e.g., "videos/<hash>/"
-    clips_prefix = base_prefix + "clips/"                      # or "frames/" if you prefer frames-only
+    clips_prefix = base_prefix + "clips/"                   
     thumbs_prefix = base_prefix + "thumbnails/"
     manifest_key = base_prefix + "manifest.json"
 
-    # 3) Short-circuit if we've already processed this video
+    # 3) Short-circuit if video has been processed
     # Preferred: single manifest file as the idempotency marker
     if s3_key_exists(bucket, manifest_key):
         # Already processed; return minimal response (or load manifest and return full)
@@ -447,7 +454,7 @@ def split_shots(req: SplitShotsRequest):
             shots=[]
         )
 
-    # Fallback: if you don't write a manifest yet, detect any existing outputs
+    # Fallback: if we don't write a manifest yet, detect any existing outputs
     if any_under_prefix(bucket, thumbs_prefix) or any_under_prefix(bucket, clips_prefix):
         return SplitShotsResponse(
             already_processed=True,
@@ -460,7 +467,7 @@ def split_shots(req: SplitShotsRequest):
     ext = os.path.splitext(key_path)[1] or ".mp4"
     local_video = os.path.join(tmp_dir, f"input-{uuid4().hex}{ext}")
     s3.download_file(bucket, key_path, local_video)
-
+    logging.info("Detecting Scenes")
     # 5) Detect scenes
     scene_list, shots = detect_scenes(
         video_path=local_video,
@@ -485,12 +492,14 @@ def split_shots(req: SplitShotsRequest):
     os.makedirs(out_dir, exist_ok=True)
     output_template = os.path.join(out_dir, "shot-$SCENE_NUMBER.mp4")
 
+    logging.info("Splitting Scenes")
+
     split_video_ffmpeg(
         input_video_path=local_video,
         scene_list=scene_list,
         output_file_template=output_template
     )
-
+    logging.info("Making Thumbnails")
     thumb_out_dir = os.path.join(tmp_dir, "thumbs")
     thumb_paths_by_scene = make_scene_thumbnails(
         video_path=local_video,
@@ -513,7 +522,7 @@ def split_shots(req: SplitShotsRequest):
     #     dest_key = clips_prefix + filename
     #     s3.upload_file(local_path, bucket, dest_key, ExtraArgs={"ContentType": "video/mp4"})
     #     clip_s3_uris.append(f"s3://{bucket}/{dest_key}")
-
+    logging.info("Uploading Thumbnails")
     for scene_paths in thumb_paths_by_scene:
         for p in scene_paths:
             dest_key = thumbs_prefix + os.path.basename(p)
@@ -521,6 +530,7 @@ def split_shots(req: SplitShotsRequest):
             uris_keys.append(dest_key)
         thumb_keys_by_scene.append(uris_keys)
     # 8) create embeddings / put in Pinecone 
+    logging.info("Creating Embeddings")
     if thumb_paths_by_scene: 
         flat_thumb_paths = [p for scene in thumb_paths_by_scene for p in scene]
         flat_embeds = create_embeddings(flat_thumb_paths)
@@ -534,7 +544,7 @@ def split_shots(req: SplitShotsRequest):
     for (start_s, end_s, start_f, end_f) in shots:
         times = pick_timepoints(start_s, end_s, count=3)
         thumb_timepoints.append(times)
-
+    logging.info("Putting Embeddings")
     put_embeddings(thumb_embeddings=thumb_embeddings, 
                    thumb_timepoints=thumb_timepoints, 
                    source=req.source_s3_uri, 
