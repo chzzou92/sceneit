@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from pathlib import Path
 from uuid import uuid4
 import os, boto3, subprocess, logging
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from dotenv import load_dotenv, dotenv_values
 from pathlib import Path
 import cv2, numpy as np, tempfile, shutil, os
@@ -20,6 +20,8 @@ from io import BytesIO
 from botocore.exceptions import ClientError
 import re
 import json
+import time
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector  # or AdaptiveDetector
@@ -72,20 +74,6 @@ class PresignReq(BaseModel):
 class ProcessReq(BaseModel):
   video_path: str  # can be "s3://bucket/key" or local path
 
-@app.post("/process")
-def process(req: ProcessReq):
-    path = req.video_path
-    if path.startswith("s3://"):
-        u = urlparse(path); bucket = u.netloc; key = u.path.lstrip("/")
-        s3.download_file(bucket, key, "/tmp/input.mp4")
-        local_path = "/tmp/input.mp4"
-        source_bucket, source_key = bucket, key
-    else:
-        local_path = path
-        source_bucket, source_key = bucket, key
-
-    # ... run ffmpeg/keyframes/embeddings here on local_path ...
-    return {"ok": True}
 
 def resolve_local_video(path: str) -> tuple[str, str|None, str|None]:
     """Return (local_path, bucket, key)."""
@@ -99,6 +87,24 @@ def resolve_local_video(path: str) -> tuple[str, str|None, str|None]:
 
 def safe_name(name:str) -> str: 
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "file.bin"
+
+class PresignRequest(BaseModel):
+    bucket: str
+    keys: list[str]
+    expires_in: int | None = 1800  # 30 minutes default
+
+@app.post("/s3/presign")
+def presign_keys(req: PresignRequest):
+    out = []
+    now = int(time.time())
+    for k in req.keys:
+        url = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": req.bucket, "Key": k},
+            ExpiresIn=req.expires_in or 1800,
+        )
+        out.append({"key": k, "url": url, "expiresAt": now + (req.expires_in or 1800)})
+    return {"items": out}
 
 @app.post("/presign")
 def presign(req: PresignReq):
@@ -139,7 +145,7 @@ def presign(req: PresignReq):
         "http_url": f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{key_path}",
         "get_url": get_url,
         "upload_url": upload_url,  # may be None if already exists
-        "key": key_path,
+        "key": key_path
     }
 
     
@@ -188,6 +194,16 @@ def video_id_from_s3_uri(s3_uri: str) -> str:
     key = s3_uri.split("/", 3)[-1]
     return hashlib.sha1(key.encode()).hexdigest()[:16]
 
+def s3_uri_to_http(s3_uri: str, region: str = AWS_REGION) -> str:
+    u = urlparse(s3_uri)
+    if u.scheme != "s3":
+        raise ValueError(f"Invalid S3 URI: {s3_uri}")
+    bucket = u.netloc
+    key = u.path.lstrip("/")
+    # URL-encode path segments but keep slashes
+    key_enc = quote(key, safe="/")
+    return f"https://{bucket}.s3.{region}.amazonaws.com/{key_enc}"
+
 # ---------- Request/Response Models ----------
 
 class SplitShotsRequest(BaseModel):
@@ -219,7 +235,7 @@ class SplitShotsResponse(BaseModel):
 def detect_scenes(video_path: str, threshold: float, min_scene_len: int):
     video = open_video(video_path)
     scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector(threshold=threshold, min_scene_len=min_scene_len))
+    scene_manager.add_detector(ContentDetector(threshold=30.0, min_scene_len=min_scene_len))
     scene_manager.detect_scenes(video)
 
     scene_list = scene_manager.get_scene_list()  
@@ -318,15 +334,15 @@ def create_embeddings(source_list: List[str]) -> List[List[float]]:
     
     return emb_list
 
-def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: List[List[float]], source: str, shots: List[ShotBoundary], thumb_s3: List[List[str]]) -> None: 
+def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: List[List[float]], source: str, shots: List[ShotBoundary], thumb_keys: List[List[str]], bucket: str) -> None: 
     vid = video_id_from_s3_uri(source)
     vectors = []
     index = pc.Index(index_name)
-    for scene_i, (scene_embeds, timepoints, shot_uris) in enumerate(zip(thumb_embeddings, thumb_timepoints, thumb_s3)):  
+    for scene_i, (scene_embeds, timepoints, thumb_key) in enumerate(zip(thumb_embeddings, thumb_timepoints, thumb_keys)):  
         # thumb_embeddings: [scene][thumb_idx][768]
         # thumb_timepoints: [scene][thumb_idx] 
         start_s, end_s, start_f, end_f = shots[scene_i]
-        for thumb_j, (vec, t_sec, uri) in enumerate(zip(scene_embeds, timepoints, shot_uris)):
+        for thumb_j, (vec, t_sec, key) in enumerate(zip(scene_embeds, timepoints, thumb_key)):
             vec_id = f"{vid}:s{scene_i:03d}:t{thumb_j:02d}"
             meta = {
                 "video_id": vid,
@@ -338,7 +354,7 @@ def put_embeddings(thumb_embeddings: List[List[List[float]]], thumb_timepoints: 
                 "end_s": float(end_s),
                 "start_f": int(start_f),
                 "end_f": int(end_f),
-                "thumb_s3_uri": uri
+                "thumb_key": key
             }
             vectors.append((vec_id, vec, meta))
 
@@ -398,7 +414,8 @@ async def search_embeddings(
             "namespace": vid,
             "query": text_search if text_search else image_search,
             "top_k": top_k,
-            "matches": matches
+            "matches": matches,
+            "bucket": S3_BUCKET
             }
     except HTTPException:
         raise
@@ -484,7 +501,7 @@ def split_shots(req: SplitShotsRequest):
     )
 
     # 7) Upload outputs under the SAME video folder
-    clip_s3_uris, thumb_s3_uris_by_scene = [], []
+    clip_s3_uris, uris_keys, thumb_keys_by_scene = [], [], []
 
     # created = sorted(
     #     f for f in os.listdir(out_dir)
@@ -498,17 +515,11 @@ def split_shots(req: SplitShotsRequest):
     #     clip_s3_uris.append(f"s3://{bucket}/{dest_key}")
 
     for scene_paths in thumb_paths_by_scene:
-        uris = []
         for p in scene_paths:
             dest_key = thumbs_prefix + os.path.basename(p)
             s3.upload_file(p, bucket, dest_key, ExtraArgs={"ContentType": "image/jpeg"})
-            get_url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": bucket, "Key": dest_key},
-                ExpiresIn=3600
-            )
-            uris.append(get_url)
-        thumb_s3_uris_by_scene.append(uris)
+            uris_keys.append(dest_key)
+        thumb_keys_by_scene.append(uris_keys)
     # 8) create embeddings / put in Pinecone 
     if thumb_paths_by_scene: 
         flat_thumb_paths = [p for scene in thumb_paths_by_scene for p in scene]
@@ -524,7 +535,12 @@ def split_shots(req: SplitShotsRequest):
         times = pick_timepoints(start_s, end_s, count=3)
         thumb_timepoints.append(times)
 
-    put_embeddings(thumb_embeddings=thumb_embeddings, thumb_timepoints=thumb_timepoints, source=req.source_s3_uri, shots=shots, thumb_s3=thumb_s3_uris_by_scene)
+    put_embeddings(thumb_embeddings=thumb_embeddings, 
+                   thumb_timepoints=thumb_timepoints, 
+                   source=req.source_s3_uri, 
+                   shots=shots,
+                   thumb_keys=thumb_keys_by_scene,
+                   bucket=S3_BUCKET)
     
     # 9) Write a small manifest.json for idempotency and UI
     manifest = {
@@ -533,7 +549,6 @@ def split_shots(req: SplitShotsRequest):
             "clips_prefix": f"s3://{bucket}/{clips_prefix}",
             "thumbnails_prefix": f"s3://{bucket}/{thumbs_prefix}",
             "clips": clip_s3_uris,
-            "thumbnails": thumb_s3_uris_by_scene,
         },
         "shots": [
             {"start_time": s[0], "end_time": s[1], "start_frame": s[2], "end_frame": s[3]}
@@ -555,7 +570,7 @@ def split_shots(req: SplitShotsRequest):
             start_time=s[0], end_time=s[1],
             start_frame=s[2], end_frame=s[3]
         ) for s in shots], 
-        thumbnail_s3_uris_by_scene=thumb_s3_uris_by_scene,
+        thumb_keys_by_scene=thumb_keys_by_scene,
         thumb_embeddings=thumb_embeddings,
         pc_namespace=video_id_from_s3_uri(req.source_s3_uri)
     )

@@ -4,9 +4,10 @@ import styled from "styled-components";
 interface SearchInputProps {
   text: string;
   setText: (value: string) => void;
+  onEnter?: () => void;
 }
 
-const SearchInput: React.FC<SearchInputProps> = ({ text, setText }) => {
+const SearchInput: React.FC<SearchInputProps> = ({ text, setText, onEnter }) => {
   return (
     <StyledWrapper>
       <input
@@ -17,6 +18,9 @@ const SearchInput: React.FC<SearchInputProps> = ({ text, setText }) => {
         placeholder="Text to search video..."
         value={text}
         onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && onEnter) onEnter();
+        }}
       />
     </StyledWrapper>
   );

@@ -20,20 +20,23 @@ export default function VideoPage() {
   const [searchText, setSearchText] = useState("");
   const [loading, setLoading] = useState(false);
   const [searchTextImages, setSearchTextImages] = useState<string[]>([]);
-  const [searchTextImagesStart, setSearchTextImagesStart] = useState<number[]>([]);
+  const [searchTextImagesStart, setSearchTextImagesStart] = useState<number[]>(
+    []
+  );
   const router = useRouter();
 
   interface Match {
     id: string;
     score: number;
     metadata: {
-      thumb_s3_uri: string;
       t_sec: number;
+      thumb_key: string;
     };
   }
 
   interface Data {
     matches: Match[];
+    bucket: string;
   }
 
   useEffect(() => {
@@ -49,7 +52,7 @@ export default function VideoPage() {
       body: JSON.stringify({
         source_s3_uri: searchTextUrl,
         threshold: 22.0,
-        min_scene_len: 12,
+        min_scene_len: 4,
         split_clips: true,
       }),
     });
@@ -72,10 +75,9 @@ export default function VideoPage() {
     } else {
       setTextError(false);
       const form = new FormData();
-      console.log(searchTextUrl);
       form.append("filename", searchTextUrl);
       form.append("text_search", searchText);
-      form.append("top_k", String(11));
+      form.append("top_k", String(10));
 
       const resp = await fetch(
         `${process.env.NEXT_PUBLIC_API}/search_embeddings`,
@@ -90,14 +92,27 @@ export default function VideoPage() {
         return;
       }
       const data: Data = await resp.json();
-      console.log(data);
       setStartPoint(data.matches[0].metadata.t_sec);
 
-      setSearchTextImages(
-        data.matches.slice(0, 7).map((match) => match.metadata.thumb_s3_uri)
+      console.log(data);
+      const bucket = data.bucket;
+      const keys = data.matches.slice(0, 7).map((m) => m.metadata.thumb_key);
+
+      const presignResp = await fetch(
+        `${process.env.NEXT_PUBLIC_API}/s3/presign`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bucket, keys, expires_in: 1800 }), // 30 min
+        }
       );
+      const { items } = await presignResp.json();
+      console.log(items);
+      // Keep both key and url so you can refresh later if needed
+      setSearchTextImages(items.map((item: any) => item.url));
+
       setSearchTextImagesStart(
-        data.matches.slice(0,7).map((match) =>match.metadata.t_sec)
+        data.matches.slice(0, 7).map((match) => match.metadata.t_sec)
       );
     }
   };
@@ -136,7 +151,11 @@ export default function VideoPage() {
       </div>
       <div className="flex flex-col gap-2">
         <div className="flex flex-row w-full gap-1">
-          <SearchInput text={searchText} setText={setSearchText} />
+          <SearchInput
+            text={searchText}
+            setText={setSearchText}
+            onEnter={getSearchText}
+          />
           <button
             className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full"
             onClick={getSearchText}
