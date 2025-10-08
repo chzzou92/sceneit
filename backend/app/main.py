@@ -39,7 +39,7 @@ if not DOTENV_PATH.exists():
     raise RuntimeError(f".env not found at {DOTENV_PATH}. Put your backend env there.")
 load_dotenv(dotenv_path=DOTENV_PATH, override=True)
 
-app = FastAPI(title="My FastAPI Backend")
+app = FastAPI(title="SceneIt Backend")
 
 origins = [
     "http://localhost:3000",

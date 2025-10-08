@@ -5,11 +5,10 @@ import { useSearchParams } from "next/navigation";
 import SearchInput from "@/components/SearchInput";
 import ErrorCard from "@/components/ErrorCard";
 import { AnimatePresence, motion } from "framer-motion";
-import Uploader from "../Uploader";
 import { useRouter } from "next/navigation";
 import Loader from "@/components/Loader";
-import { setLazyProp } from "next/dist/server/api-utils";
 import S3ImageCarousel from "@/components/S3ImageCarousel";
+import PhotoUpload from "@/components/PhotoUpload";
 export default function VideoPage() {
   const sp = useSearchParams();
   const url = sp.get("url") ?? "";
@@ -23,7 +22,9 @@ export default function VideoPage() {
   const [searchTextImagesStart, setSearchTextImagesStart] = useState<number[]>(
     []
   );
+  const [imageFile, setImageFile] = useState<File | null>(null);
   const router = useRouter();
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   interface Match {
     id: string;
@@ -65,35 +66,59 @@ export default function VideoPage() {
     setLoading(false);
   };
 
-  const getSearchText = async () => {
-    if (searchText === "") {
-      setTextError(true);
-      setErrorType("no-text");
-    } else if (searchTextUrl === "") {
+  useEffect(() => {
+    if (!imageFile) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(imageFile);
+    setPreviewUrl(url);
+    getSearch();
+    return () => URL.revokeObjectURL(url);
+  }, [imageFile]);
+
+  const getSearch = async () => {
+    if (!searchTextUrl.trim()) {
       setTextError(true);
       setErrorType("no-url");
-    } else {
-      setTextError(false);
+      return;
+    }
+
+    const hasText = !!searchText.trim();
+    const hasImage = !!imageFile;
+    if (!hasText && !hasImage) {
+      setTextError(true);
+      setErrorType("no-query");
+      return;
+    }
+    setTextError(false);
+
+    try {
       const form = new FormData();
       form.append("filename", searchTextUrl);
-      form.append("text_search", searchText);
       form.append("top_k", String(10));
+
+      if (hasImage) {
+        form.append("image_search", imageFile as Blob, imageFile!.name);
+      } else {
+        form.append("text_search", searchText);
+      }
 
       const resp = await fetch(
         `${process.env.NEXT_PUBLIC_API}/search_embeddings`,
         {
           method: "POST",
-          body: form,
+          body: form, // DO NOT set Content-Type; browser sets multipart boundary
         }
       );
-
       if (!resp.ok) {
         console.error("Search failed:", await resp.text());
         return;
       }
-      const data: Data = await resp.json();
-      setStartPoint(data.matches[0].metadata.t_sec);
 
+      // parse + presign
+      const data: Data = await resp.json();
+      setStartPoint(data.matches[0]?.metadata.t_sec ?? 0);
       console.log(data);
       const bucket = data.bucket;
       const keys = data.matches.slice(0, 7).map((m) => m.metadata.thumb_key);
@@ -103,18 +128,23 @@ export default function VideoPage() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ bucket, keys, expires_in: 1800 }), // 30 min
+          body: JSON.stringify({ bucket, keys, expires_in: 1800 }),
         }
       );
       const { items } = await presignResp.json();
-      console.log(items);
-      // Keep both key and url so you can refresh later if needed
-      setSearchTextImages(items.map((item: any) => item.url));
 
+      setSearchTextImages(items.map((it: any) => it.url));
       setSearchTextImagesStart(
-        data.matches.slice(0, 7).map((match) => match.metadata.t_sec)
+        data.matches.slice(0, 7).map((m) => m.metadata.t_sec)
       );
+    } catch (e) {
+      console.error(e);
     }
+  };
+
+  const onPickImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] ?? null;
+    setImageFile(f);
   };
   return (
     <div className="flex flex-col p-24 min-h-screen items-center justify-center">
@@ -162,15 +192,25 @@ export default function VideoPage() {
           <SearchInput
             text={searchText}
             setText={setSearchText}
-            onEnter={getSearchText}
+            onEnter={getSearch}
           />
           <button
             className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full"
-            onClick={getSearchText}
+            onClick={getSearch}
           >
             Search
           </button>
+          <div className="flex items-center justify-center">
+            <PhotoUpload onChange={onPickImage} />
+          </div>
         </div>
+        {previewUrl && (
+          <img
+            src={previewUrl}
+            alt="query preview"
+            className="mt-2 h-24 w-24 object-cover rounded"
+          />
+        )}
         <div className="relative h-0">
           <AnimatePresence initial={false}>
             {textError && (
@@ -188,14 +228,6 @@ export default function VideoPage() {
           </AnimatePresence>
         </div>
       </div>
-      {/* <div className="py-12">
-        <Uploader
-          type="photo"
-          setUrl={setVideoUrl}
-          setS3Uri={setSearchTextUrl}
-          setNextPage={setNextPage}
-        />
-      </div> */}
     </div>
   );
 }

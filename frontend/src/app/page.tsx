@@ -27,7 +27,6 @@ export default function Home() {
         <h1 className="text-2xl font-bold">SceneIt</h1>
         <div className="flex flex-col gap-4 items-centersm:flex-row">
           <Uploader
-            type="video"
             setUrl={setVideoUrl}
             setS3Uri={setSearchTextUrl}
             setNextPage={setNextPage}
