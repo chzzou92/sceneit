@@ -4,6 +4,7 @@ interface ErrorProps {
 }
 const ErrorCard: React.FC<ErrorProps> = ({ type }) => {
   let message = "";
+  let title = "Please try again";
 
   switch (type) {
     case "no-text":
@@ -13,9 +14,11 @@ const ErrorCard: React.FC<ErrorProps> = ({ type }) => {
       message = "Please provide a video URL / S3 URI";
       break;
     case "already-split":
+      title = "Note:"
       message = "This video is already processed.";
       break;
     default:
+      title = "Error:"
       message = "An unknown error occurred";
   }
   return (
@@ -39,7 +42,7 @@ const ErrorCard: React.FC<ErrorProps> = ({ type }) => {
             </svg>
           </div>
           <div>
-            <p className="text-white">Please try again</p>
+            <p className="text-white">{title}</p>
             <p className="text-gray-500">{message}</p>
           </div>
         </div>

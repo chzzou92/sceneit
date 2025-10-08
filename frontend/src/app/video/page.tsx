@@ -126,13 +126,21 @@ export default function VideoPage() {
           Back
         </button>
       </div>
-      {loading ? (
-        <div className="absolute center z-10">
-          <Loader />
-        </div>
-      ) : (
-        ""
-      )}
+      <AnimatePresence initial={false}>
+        {loading && (
+          <motion.div
+            key={loading}
+            className="absolute center z-10"
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.25 }}
+          >
+            <Loader />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="w-1/2 h-1/2 items-center justify-center">
         <VideoPlayer src={url} startAt={startPoint} autoPlayOnSeek={false} />
         <S3ImageCarousel

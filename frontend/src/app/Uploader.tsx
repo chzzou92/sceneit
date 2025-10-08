@@ -9,6 +9,7 @@ type UploaderProps = {
   setUrl: React.Dispatch<React.SetStateAction<string>>;
   setS3Uri: React.Dispatch<React.SetStateAction<string>>;
   setNextPage: React.Dispatch<React.SetStateAction<boolean>>;
+  setLoad: React.Dispatch<React.SetStateAction<boolean>>;
 };
 
 export default function Uploader({
@@ -16,6 +17,7 @@ export default function Uploader({
   setUrl,
   setS3Uri,
   setNextPage,
+  setLoad
 }: UploaderProps) {
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<
@@ -45,6 +47,7 @@ export default function Uploader({
   };
 
   const uploadFile = async (f: File, hash: String) => {
+    setLoad(true);
     setStatus("uploading");
     try {
       if (type === "video") {
@@ -87,6 +90,7 @@ export default function Uploader({
           // });
         }
         setStatus("done");
+        setLoad(false);
         setNextPage(true);
       } else if (type === "photo") {
         const form = new FormData();
