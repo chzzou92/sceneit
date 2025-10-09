@@ -204,13 +204,16 @@ export default function VideoPage() {
             <PhotoUpload onChange={onPickImage} />
           </div>
         </div>
-        {previewUrl && (
-          <img
-            src={previewUrl}
-            alt="query preview"
-            className="mt-2 h-24 w-24 object-cover rounded"
-          />
-        )}
+        <div className="flex items-center justify-center">
+          {previewUrl && (
+            <img
+              src={previewUrl}
+              alt="query preview"
+              className="mt-2 h-24 w-24 object-cover rounded transition duration-300 ease-out will-change-transform hover:scale-[1.02] hover:shadow-[0_0_28px_8px_rgba(59,130,246,0.55)]
+                    hover:ring-2 hover:ring-[rgb(59_130_246)] hover:ring-offset-2 hover:ring-offset-black/60"
+            />
+          )}
+        </div>
         <div className="relative h-0">
           <AnimatePresence initial={false}>
             {textError && (
