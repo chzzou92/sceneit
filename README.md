@@ -6,6 +6,10 @@ At its core, SceneIt extracts representative frames from videos, embeds them usi
 
 ---
 
+# Demo : 
+
+[![Watch the video](frontend/uploads/Demo.png)](https://vimeo.com/1126039030/17891b7ddc?share=copy)
+
 ## Features
 
 - Upload videos directly to S3 via presigned URLs for scalability and resumability.
