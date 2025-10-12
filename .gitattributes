@@ -1,30 +1,18 @@
-# --- Deps & builds (don’t count toward language stats) ---
+
+frontend/**                   linguist-vendored
+
+
 node_modules/**               linguist-vendored
-frontend/node_modules/**      linguist-vendored
+**/__pycache__/**             linguist-generated
+**/*.pyc                      linguist-generated
+backend/.venv/**              linguist-vendored
 frontend/.next/**             linguist-generated
 frontend/dist/**              linguist-generated
 frontend/out/**               linguist-generated
-backend/.venv/**              linguist-vendored
-backend/__pycache__/**        linguist-generated
-**/*.pyc                      linguist-generated
-
-# --- Large static assets shouldn’t affect language ---
 frontend/public/**            linguist-vendored
-**/*.min.js                   linguist-generated
-**/*.map                      linguist-generated
-**/*.svg                      linguist-vendored
-**/*.png                      linguist-vendored
-**/*.jpg                      linguist-vendored
-**/*.jpeg                     linguist-vendored
-**/*.gif                      linguist-vendored
-**/*.webp                     linguist-vendored
-**/*.mp4                      linguist-vendored
-**/*.mov                      linguist-vendored
-
-# --- Lockfiles can skew byte counts a lot ---
 package-lock.json             linguist-vendored
 pnpm-lock.yaml                linguist-vendored
 yarn.lock                     linguist-vendored
 
-# --- Nudge Linguist to keep backend fully detectable ---
-backend/**                    linguist-detectable=true
+
+backend/**                    linguist-language=Python
